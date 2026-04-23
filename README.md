@@ -50,15 +50,39 @@ Translation     →  Anthropic, Ollama, IndicTrans2
 dharmagpt/
 ├── api/routes/           # FastAPI route handlers
 ├── core/                 # RAG engine, retrieval, LLM
-├── pipelines/            # Data ingestion pipelines
+├── pipelines/            # Audio chunking, translation, indexing
 ├── models/               # Pydantic models
-└── utils/                # Helpers, logging
+├── scripts/              # Integrated pipeline scripts (use dharmagpt package)
+│   ├── scrape_valmiki_kanda.py
+│   ├── normalize.py
+│   ├── auto_translate.py
+│   ├── ingest.py
+│   └── batch_segment_and_transcribe.py
+└── utils/                # Helpers, logging, canonical naming
 scripts/
-├── audio/                # Sarvam audio pipeline
-└── embed/                # Pinecone embedding pipeline
+└── audio/                # Standalone audio tools (no server required)
+    ├── audio_pipeline.py
+    ├── sarvam_translate.py
+    └── sarvam_translate_batch.py
 data/                     # Local data (gitignored)
 tests/                    # Tests
 ```
+
+### Integrated scripts vs standalone scripts
+
+**`dharmagpt/scripts/`** — the production data pipeline. These scripts import from the `dharmagpt` package (`core.config`, `core.translation`, `utils.naming`) and must be run from inside the `dharmagpt/` directory with a configured `.env`. They write output to `knowledge/processed/` using the [canonical file naming convention](#knowledge-file-naming) and feed data into Pinecone.
+
+| Script | What it does |
+|---|---|
+| `scrape_valmiki_kanda.py` | Scrapes valmikiramayan.net → raw JSONL |
+| `normalize.py` | Cleans raw JSONL → flat corpus schema |
+| `auto_translate.py` | Batch-translates corpus records to English |
+| `ingest.py` | Embeds corpus records and upserts to Pinecone |
+| `batch_segment_and_transcribe.py` | Splits source audio into 29s clips and uploads each to the running API for transcription |
+
+Run them in order for text corpus: `scrape → normalize → auto_translate → ingest`. For audio: `batch_segment_and_transcribe` (requires the API server running).
+
+**`scripts/audio/`** — standalone offline tools. These call external APIs (Sarvam STT, Anthropic) directly without needing a running DharmaGPT server. Useful for quick local testing, processing audio on a machine without all credentials configured, or prototyping new language support. Output is JSONL written to local files rather than Pinecone.
 
 ---
 
@@ -153,11 +177,13 @@ Place your editable JSONL files under `dharmagpt/knowledge/processed/` and mount
 ### Ingest Data
 
 ```bash
-# 2. Process your audio files
-python scripts/audio/audio_pipeline.py --input data/audio/ --batch
+# Scrape and process text corpus (run from dharmagpt/)
+python scripts/normalize.py
+python scripts/auto_translate.py
+python scripts/ingest.py
 
-# 3. Embed and index everything
-python scripts/embed/embed_and_index.py --input data/chunks/ --index dharma-gpt
+# Process audio (requires API server running)
+python scripts/batch_segment_and_transcribe.py --input-dir data/audio/ --language-code te-IN
 ```
 
 ---
