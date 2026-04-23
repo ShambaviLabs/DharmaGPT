@@ -85,9 +85,6 @@ uvicorn api.main:app --reload --port 8000
 ### Ingest Data
 
 ```bash
-# 1. Scrape valmikiramayan.net
-python scripts/scraper/valmiki_scraper.py --kanda all --output data/chunks/
-
 # 2. Process your audio files
 python scripts/audio/audio_pipeline.py --input data/audio/ --batch
 
