@@ -131,11 +131,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## Sources & Acknowledgements
 
 - **Valmiki Ramayana** — [valmikiramayan.net](https://www.valmikiramayan.net/) (K. M. K. Murthy translation)
-- **Sundara Kanda** — TTD Edition, trans. Smt. Krishna Kota (Tirumala Tirupati Devasthanams, 2013)
-- **Mahabharata** — Kisari Mohan Ganguli translation (public domain)
-- **Bhagavad Gita** — Multiple public domain translations
-- **Upanishads** — Max Müller & Patrick Olivelle translations
-- **Audio Processing** — [Sarvam AI](https://sarvam.ai) Saaras v3 (22 Indian languages)
+
 
 ---
 
