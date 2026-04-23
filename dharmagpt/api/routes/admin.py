@@ -473,6 +473,9 @@ def _admin_page() -> str:
           <div>
             <div class="block-label">Model translation</div>
             <div class="text-preview">${{item.text_en_model || ""}}</div>
+            <div class="small" style="margin-top: 6px;">
+              ${{item.translation_backend || "unknown"}}${{item.translation_version ? " • " + item.translation_version : ""}}${{item.translation_fallback_reason ? " • " + item.translation_fallback_reason : ""}}
+            </div>
           </div>
           <div>
             <div class="block-label">Manual translation</div>

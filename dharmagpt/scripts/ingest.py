@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 
+from utils.naming import dataset_id_from_path, is_canonical_part_file
+
 load_dotenv()
 log = structlog.get_logger()
 
@@ -90,10 +92,11 @@ def validate_record(record: dict, line_no: int, filename: str) -> list[str]:
 
 # ─── Loading ──────────────────────────────────────────────────────────────────
 
-def iter_records(files: list[Path]) -> Generator[tuple[dict, str], None, None]:
-    """Yield (record, filename) for all valid records across files."""
+def iter_records(files: list[Path]) -> Generator[tuple[dict, str, str], None, None]:
+    """Yield (record, filename, dataset_id) for all valid records across files."""
     total_errors = 0
     for f in files:
+        dataset_id = dataset_id_from_path(f, root=PROCESSED_DIR)
         log.info("reading_file", path=str(f))
         with f.open(encoding="utf-8") as fh:
             for line_no, line in enumerate(fh, 1):
@@ -112,7 +115,7 @@ def iter_records(files: list[Path]) -> Generator[tuple[dict, str], None, None]:
                         log.warning("validation_error", msg=err)
                     total_errors += 1
                     continue
-                yield record, f.name
+                yield record, f.name, dataset_id
     if total_errors:
         log.warning("validation_summary", total_errors=total_errors)
 
@@ -133,7 +136,7 @@ def batch_embed(texts: list[str], client: OpenAI) -> list[list[float]]:
 
 # ─── Pinecone Metadata Builder ───────────────────────────────────────────────
 
-def build_metadata(record: dict) -> dict:
+def build_metadata(record: dict, dataset_id: str) -> dict:
     """Extract Pinecone-storable metadata from a corpus record."""
     # Pinecone metadata values must be str, int, float, bool, or list[str]
     meta: dict = {
@@ -149,6 +152,7 @@ def build_metadata(record: dict) -> dict:
         "url": record.get("url", ""),
         "has_telugu": bool(record.get("text_te", "").strip()),
         "has_english": bool(record.get("text_en", "").strip()),
+        "dataset_id": dataset_id,
     }
     if record.get("kanda"):
         meta["kanda"] = record["kanda"]
@@ -176,9 +180,10 @@ def build_embed_text(record: dict) -> str:
 
 
 def ingest(files: list[Path], dry_run: bool = False, delete_index: bool = False) -> None:
-    openai_client = get_openai()
+    openai_client = None
 
     if not dry_run:
+        openai_client = get_openai()
         pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
         if delete_index:
             existing = [i["name"] for i in pc.list_indexes()]
@@ -200,18 +205,18 @@ def ingest(files: list[Path], dry_run: bool = False, delete_index: bool = False)
         return
 
     # Build embed texts
-    embed_texts = [build_embed_text(r) for r, _ in records_list]
+    embed_texts = [build_embed_text(r) for r, _, _ in records_list]
     log.info("embedding_start", count=len(embed_texts))
     vectors = batch_embed(embed_texts, openai_client)
     log.info("embedding_done", count=len(vectors))
 
     # Build Pinecone records
     pinecone_records = []
-    for (record, _), vector in zip(records_list, vectors):
+    for (record, _, dataset_id), vector in zip(records_list, vectors):
         pinecone_records.append({
             "id": record["id"],
             "values": vector,
-            "metadata": build_metadata(record),
+            "metadata": build_metadata(record, dataset_id=dataset_id),
         })
 
     # Upsert in batches
@@ -236,6 +241,12 @@ def main():
                         help="Validate records without embedding or upserting")
     parser.add_argument("--delete-index", action="store_true",
                         help="Delete the Pinecone index before ingestion (fresh re-index)")
+    parser.add_argument("--recursive", action="store_true", help="Scan knowledge/processed recursively")
+    parser.add_argument(
+        "--partitioned-only",
+        action="store_true",
+        help="Only ingest partitioned files named part-*.jsonl",
+    )
     args = parser.parse_args()
 
     if args.file:
@@ -244,11 +255,14 @@ def main():
             sys.exit(f"❌  File not found: {target}")
         files = [target]
     else:
-        files = sorted(PROCESSED_DIR.glob("*.jsonl"))
+        pattern = "**/*.jsonl" if args.recursive else "*.jsonl"
+        files = sorted(PROCESSED_DIR.glob(pattern))
+        if args.partitioned_only:
+            files = [f for f in files if is_canonical_part_file(f)]
         if not files:
             sys.exit(f"❌  No .jsonl files found in {PROCESSED_DIR}")
 
-    print(f"📚  Files to ingest: {[f.name for f in files]}")
+    print(f"📚  Files to ingest: {[str(f.relative_to(PROCESSED_DIR)) for f in files]}")
     ingest(files, dry_run=args.dry_run, delete_index=args.delete_index)
 
 

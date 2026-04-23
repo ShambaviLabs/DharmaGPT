@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "http://localhost:11434"
     llm_timeout_sec: int = 120
+    ollama_model: str = "qwen2.5:7b"
+    ollama_url: str = "http://localhost:11434"
 
     # OpenAI (embeddings)
     openai_api_key: str
@@ -31,6 +33,7 @@ class Settings(BaseSettings):
 
     # Sarvam AI
     sarvam_api_key: str
+    indictrans2_model: str = "ai4bharat/indictrans2-indic-en-dist-200M"
 
     # Manual translation review API
     manual_translation_api_key: str = ""

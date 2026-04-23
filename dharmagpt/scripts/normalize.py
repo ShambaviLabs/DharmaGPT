@@ -8,6 +8,7 @@ Usage:
     python scripts/normalize.py                         # normalize all scraped files
     python scripts/normalize.py --file sundara_chunks.jsonl
     python scripts/normalize.py --dry-run               # report issues, don't write
+    python scripts/normalize.py --author chaganti --language te --kind audio
 """
 
 import argparse
@@ -15,6 +16,9 @@ import json
 import re
 import sys
 from pathlib import Path
+from math import ceil
+
+from utils.naming import canonical_jsonl_filename, normalize_language_tag, slugify
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -188,13 +192,88 @@ def scraped_to_schema(raw: dict, filename: str) -> dict | None:
     }
 
 
+def slugify_kanda(name: str) -> str:
+    slug = (name or "unknown_kanda").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "_", slug)
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "unknown_kanda"
+
+
+def partition_dir_for(record: dict) -> Path:
+    source_type = (record.get("source_type") or "text").strip().lower()
+    source = (record.get("source") or "unknown_source").strip().lower().replace(" ", "_")
+    kanda_slug = slugify_kanda(str(record.get("kanda") or "unknown_kanda"))
+    return PROCESSED_DIR / source_type / source / kanda_slug
+
+
+def write_partitioned_records(records: list[dict], partition_size: int, naming: dict[str, str]) -> list[Path]:
+    """
+    Write records as partitioned files:
+    knowledge/processed/<source_type>/<source>/<kanda>/<canonical>_partNN.jsonl
+    """
+    grouped: dict[Path, list[dict]] = {}
+    for record in records:
+        base = partition_dir_for(record)
+        grouped.setdefault(base, []).append(record)
+
+    written_files: list[Path] = []
+    for base, items in grouped.items():
+        base.mkdir(parents=True, exist_ok=True)
+        total_parts = max(1, ceil(len(items) / partition_size))
+        for idx in range(total_parts):
+            start = idx * partition_size
+            end = start + partition_size
+            part_items = items[start:end]
+            out_path = base / canonical_jsonl_filename(
+                naming["source"],
+                title=naming["title"],
+                author=naming["author"],
+                language=naming["language"],
+                kind=naming["kind"],
+                part=idx + 1,
+            )
+            with out_path.open("w", encoding="utf-8") as fh:
+                for record in part_items:
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            written_files.append(out_path)
+
+    return written_files
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-def normalize_file(src: Path, dry_run: bool) -> dict:
-    stats = {"read": 0, "written": 0, "skipped_noise": 0, "skipped_invalid": 0}
+def _naming_context(src: Path, records: list[dict], source: str | None, title: str | None, author: str | None, language: str | None, kind: str | None) -> dict[str, str]:
+    first = records[0] if records else {}
+    resolved_source = source or (first.get("source") if isinstance(first.get("source"), str) else None) or src.stem
+    resolved_title = title or (str(first.get("kanda")) if first.get("kanda") else None) or src.stem
+    resolved_author = author or (str(first.get("author")) if first.get("author") else None)
+    resolved_language = language or (str(first.get("language")) if first.get("language") else None) or "en"
+    resolved_kind = kind or (str(first.get("source_type")) if first.get("source_type") else None) or "processed"
+    if resolved_kind == "text":
+        resolved_kind = "processed"
+    elif resolved_kind == "audio_transcript":
+        resolved_kind = "transcript"
+    return {
+        "source": slugify(resolved_source, default="unknown_source"),
+        "title": slugify(resolved_title, default="unknown_title"),
+        "author": slugify(resolved_author, default="unknown_author") if resolved_author else "unknown_author",
+        "language": normalize_language_tag(resolved_language),
+        "kind": slugify(resolved_kind, default="processed"),
+    }
 
-    out_name = src.stem.replace("_chunks", "") + "_normalized.jsonl"
-    out_path = PROCESSED_DIR / out_name
+
+def normalize_file(
+    src: Path,
+    dry_run: bool,
+    layout: str,
+    partition_size: int,
+    source: str | None,
+    title: str | None,
+    author: str | None,
+    language: str | None,
+    kind: str | None,
+) -> dict:
+    stats = {"read": 0, "written": 0, "skipped_noise": 0, "skipped_invalid": 0}
 
     lines_out = []
     seen_ids: set[str] = set()
@@ -226,10 +305,25 @@ def normalize_file(src: Path, dry_run: bool) -> dict:
             stats["written"] += 1
 
     if not dry_run and lines_out:
+        records = [json.loads(line) for line in lines_out]
         PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines_out) + "\n")
-        print(f"  ✅  {src.name} → {out_path.name}  ({stats['written']} records written)")
+        naming = _naming_context(src, records, source, title, author, language, kind)
+        if layout in {"flat", "both"}:
+            out_path = PROCESSED_DIR / canonical_jsonl_filename(
+                naming["source"],
+                title=naming["title"],
+                author=naming["author"],
+                language=naming["language"],
+                kind=naming["kind"],
+                part=1,
+            )
+            with out_path.open("w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines_out) + "\n")
+            print(f"  ✅  flat: {src.name} → {out_path.name}  ({stats['written']} records)")
+
+        if layout in {"partitioned", "both"}:
+            written = write_partitioned_records(records, partition_size=partition_size, naming=naming)
+            print(f"  ✅  partitioned: {src.name} → {len(written)} part file(s)")
     else:
         print(f"  🔍  {src.name}: {stats['written']} would be written, "
               f"{stats['skipped_noise']} noise skipped")
@@ -241,6 +335,23 @@ def main():
     parser = argparse.ArgumentParser(description="Normalize scraped Valmiki JSONL files")
     parser.add_argument("--file", type=str, default=None, help="Single file to normalize")
     parser.add_argument("--dry-run", action="store_true", help="Report stats without writing")
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "partitioned", "both"],
+        default="both",
+        help="Output layout under knowledge/processed",
+    )
+    parser.add_argument("--source", type=str, default=None, help="Override canonical source slug")
+    parser.add_argument("--title", type=str, default=None, help="Override canonical work/title slug")
+    parser.add_argument("--author", type=str, default=None, help="Override canonical author slug")
+    parser.add_argument("--language", type=str, default=None, help="Override canonical language slug")
+    parser.add_argument("--kind", type=str, default=None, help="Override canonical artifact kind slug")
+    parser.add_argument(
+        "--partition-size",
+        type=int,
+        default=1000,
+        help="Max records per partitioned output file",
+    )
     args = parser.parse_args()
 
     if not SCRAPED_DIR.exists():
@@ -261,7 +372,17 @@ def main():
         if f.stat().st_size == 0:
             print(f"  ⏭️   {f.name}: empty — skipping")
             continue
-        stats = normalize_file(f, dry_run=args.dry_run)
+        stats = normalize_file(
+            f,
+            dry_run=args.dry_run,
+            layout=args.layout,
+            partition_size=max(1, args.partition_size),
+            source=args.source,
+            title=args.title,
+            author=args.author,
+            language=args.language,
+            kind=args.kind,
+        )
         for k in totals:
             totals[k] += stats[k]
 

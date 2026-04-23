@@ -50,8 +50,16 @@ class AudioTranscribeRequest(BaseModel):
 
 class AudioTranscribeResponse(BaseModel):
     transcript: str
+    translated_transcript: Optional[str] = None
     chunks_created: int
     file_name: str
+    transcript_file_name: Optional[str] = None
+    transcription_mode: str = "sarvam_stt"
+    transcription_version: str = "saaras:v3"
+    translation_mode: Optional[str] = None
+    translation_backend: Optional[str] = None
+    translation_version: Optional[str] = None
+    translation_fallback_reason: Optional[str] = None
 
 
 class ManualTranslationItem(BaseModel):
@@ -95,6 +103,10 @@ class ManualTranslationRecord(BaseModel):
     text_te: Optional[str] = None
     text_en_model: Optional[str] = None
     text_en_manual: Optional[str] = None
+    translation_mode: Optional[str] = None
+    translation_backend: Optional[str] = None
+    translation_version: Optional[str] = None
+    translation_fallback_reason: Optional[str] = None
     review_status: Optional[str] = None
     reviewer: Optional[str] = None
     review_note: Optional[str] = None

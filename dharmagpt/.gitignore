@@ -56,4 +56,5 @@ logs/
 *.pkl
 
 # ── Large data files (commit schema + seed only) ─────────────────────────────
-knowledge/processed/audio_*.jsonl
+knowledge/processed/**/*_audio_part*.jsonl
+knowledge/processed/**/*_transcript_part*.jsonl

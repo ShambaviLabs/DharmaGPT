@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
-from typing import Optional
+import threading
 
 import requests
+
+
+_INDICTRANS2_LOCK = threading.Lock()
 
 
 class TranslationBackend(str, Enum):
@@ -29,6 +32,38 @@ class TranslationConfig:
     indictrans2_tgt_lang: str = "eng_Latn"
 
 
+@dataclass(frozen=True)
+class TranslationOutcome:
+    text: str
+    requested_mode: str
+    backend: str
+    version: str
+    source_lang: str
+    target_lang: str
+    attempted_backends: tuple[str, ...] = ()
+    fallback_reason: str | None = None
+
+    @property
+    def mode(self) -> str:
+        return self.backend
+
+
+def _backend_version(config: TranslationConfig, backend: TranslationBackend) -> str:
+    if backend == TranslationBackend.anthropic:
+        return config.anthropic_model
+    if backend == TranslationBackend.ollama:
+        return config.ollama_model
+    if backend == TranslationBackend.indictrans2:
+        return config.indictrans2_model
+    return backend.value
+
+
+def _normalize_backend(value: TranslationBackend | str) -> TranslationBackend:
+    if isinstance(value, TranslationBackend):
+        return value
+    return TranslationBackend(str(value).lower())
+
+
 def _normalize_flores_lang(lang: str) -> str:
     lang = (lang or "").strip()
     if lang in {"te", "tel", "telugu"}:
@@ -45,6 +80,19 @@ def _ollama_available(base_url: str, timeout_sec: int = 5) -> bool:
         return True
     except Exception:
         return False
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 429:
+        return True
+
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) == 429:
+        return True
+
+    text = str(exc).lower()
+    return "rate limit" in text or "too many requests" in text or "429" in text
 
 
 def _translate_with_anthropic(text: str, config: TranslationConfig, source_lang: str, target_lang: str) -> str:
@@ -127,33 +175,50 @@ def _translate_with_indictrans2(
 ) -> str:
     import torch
 
-    tokenizer, model, device = _load_indictrans2_model(config.indictrans2_model)
-    sentences = _split_sentences(text, source_lang)
-    outputs: list[str] = []
+    with _INDICTRANS2_LOCK:
+        tokenizer, model, device = _load_indictrans2_model(config.indictrans2_model)
+        sentences = _split_sentences(text, source_lang)
+        outputs: list[str] = []
 
-    with torch.no_grad():
-        for sentence in sentences:
-            inputs = tokenizer(
-                sentence,
-                truncation=True,
-                padding=False,
-                return_tensors="pt",
-            ).to(device)
-            generated = model.generate(
-                **inputs,
-                max_new_tokens=256,
-                num_beams=5,
-                num_return_sequences=1,
-            )
-            decoded = tokenizer.batch_decode(
-                generated,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=True,
-            )
-            if decoded:
-                outputs.append(decoded[0].strip())
+        with torch.no_grad():
+            for sentence in sentences:
+                inputs = tokenizer(
+                    sentence,
+                    truncation=True,
+                    padding=False,
+                    return_tensors="pt",
+                ).to(device)
+                generated = model.generate(
+                    **inputs,
+                    max_new_tokens=256,
+                    num_beams=5,
+                    num_return_sequences=1,
+                )
+                decoded = tokenizer.batch_decode(
+                    generated,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=True,
+                )
+                if decoded:
+                    outputs.append(decoded[0].strip())
 
     return " ".join(piece for piece in outputs if piece).strip()
+
+
+def _candidate_backends(requested_backend: TranslationBackend) -> list[TranslationBackend]:
+    preferred = [
+        TranslationBackend.anthropic,
+        TranslationBackend.ollama,
+        TranslationBackend.indictrans2,
+    ]
+    if requested_backend == TranslationBackend.auto:
+        return preferred
+
+    candidates = [requested_backend]
+    for backend in preferred:
+        if backend not in candidates:
+            candidates.append(backend)
+    return candidates
 
 
 def translate_text(
@@ -162,34 +227,91 @@ def translate_text(
     config: TranslationConfig,
     source_lang: str = "te",
     target_lang: str = "en",
-) -> tuple[str, str]:
+) -> TranslationOutcome:
     """
     Translate text with a selectable backend.
-
-    Returns a tuple of (translated_text, backend_used).
     """
     if config.backend == TranslationBackend.skip:
-        return "[Translation skipped]", TranslationBackend.skip.value
+        return TranslationOutcome(
+            text="[Translation skipped]",
+            requested_mode=TranslationBackend.skip.value,
+            backend=TranslationBackend.skip.value,
+            version=TranslationBackend.skip.value,
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )
 
     source_lang = _normalize_flores_lang(source_lang)
     target_lang = _normalize_flores_lang(target_lang)
 
-    backend = TranslationBackend((config.backend.value if isinstance(config.backend, TranslationBackend) else str(config.backend)).lower())
-    if backend == TranslationBackend.auto:
-        if _ollama_available(config.ollama_url, timeout_sec=5):
-            backend = TranslationBackend.ollama
-        elif config.anthropic_api_key:
-            backend = TranslationBackend.anthropic
-        else:
-            backend = TranslationBackend.indictrans2
+    requested_backend = _normalize_backend(config.backend)
+    candidates = _candidate_backends(requested_backend)
+    attempted: list[str] = []
+    fallback_reason: str | None = None
 
-    if backend == TranslationBackend.anthropic:
-        return _translate_with_anthropic(text, config, source_lang, target_lang), backend.value
+    for backend in candidates:
+        attempted.append(backend.value)
+        try:
+            if backend == TranslationBackend.anthropic:
+                translated = _translate_with_anthropic(text, config, source_lang, target_lang)
+            elif backend == TranslationBackend.ollama:
+                if backend == TranslationBackend.ollama and not _ollama_available(config.ollama_url, timeout_sec=5):
+                    raise RuntimeError("Ollama is unavailable")
+                translated = _translate_with_ollama(text, config, source_lang, target_lang)
+            elif backend == TranslationBackend.indictrans2:
+                translated = _translate_with_indictrans2(text, config, source_lang, target_lang)
+            else:
+                raise ValueError(f"Unknown translation backend: {backend}")
 
-    if backend == TranslationBackend.ollama:
-        return _translate_with_ollama(text, config, source_lang, target_lang), backend.value
+            return TranslationOutcome(
+                text=translated,
+                requested_mode=requested_backend.value,
+                backend=backend.value,
+                version=_backend_version(config, backend),
+                source_lang=source_lang,
+                target_lang=target_lang,
+                attempted_backends=tuple(attempted),
+                fallback_reason=fallback_reason,
+            )
+        except Exception as exc:
+            is_rate_limited = _is_rate_limit_error(exc)
+            if is_rate_limited:
+                fallback_reason = f"rate_limited:{backend.value}"
+                continue
+            if backend != TranslationBackend.indictrans2:
+                fallback_reason = f"failed:{backend.value}"
+                continue
+            raise
 
-    if backend == TranslationBackend.indictrans2:
-        return _translate_with_indictrans2(text, config, source_lang, target_lang), backend.value
+    if TranslationBackend.indictrans2 not in candidates:
+        translated = _translate_with_indictrans2(text, config, source_lang, target_lang)
+        return TranslationOutcome(
+            text=translated,
+            requested_mode=requested_backend.value,
+            backend=TranslationBackend.indictrans2.value,
+            version=_backend_version(config, TranslationBackend.indictrans2),
+            source_lang=source_lang,
+            target_lang=target_lang,
+            attempted_backends=tuple(attempted + [TranslationBackend.indictrans2.value]),
+            fallback_reason=fallback_reason,
+        )
 
-    raise ValueError(f"Unknown translation backend: {backend}")
+    raise RuntimeError("No translation backend succeeded")
+
+
+async def translate_text_async(
+    text: str,
+    *,
+    config: TranslationConfig,
+    source_lang: str = "te",
+    target_lang: str = "en",
+) -> TranslationOutcome:
+    import asyncio
+
+    return await asyncio.to_thread(
+        translate_text,
+        text,
+        config=config,
+        source_lang=source_lang,
+        target_lang=target_lang,
+    )

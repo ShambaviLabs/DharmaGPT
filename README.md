@@ -99,6 +99,20 @@ The manual translation endpoints now use dataset IDs instead of raw file paths a
 
 Set `MANUAL_TRANSLATION_API_KEY` in `.env` before exposing the API to employees. Keep approved datasets under `MANUAL_TRANSLATION_DATASET_ROOT` and list any explicit allowlist in `MANUAL_TRANSLATION_ALLOWED_DATASETS`.
 
+### Knowledge File Naming
+
+Generated knowledge files now follow a canonical stem:
+
+`<source>[_<title>][_<author>]_<language>_<kind>_partNN.jsonl`
+
+Examples:
+
+- `valmiki_ramayanam_chaganti_te_audio_part01.jsonl`
+- `valmiki_ramayanam_chaganti_te_transcript_part01.jsonl`
+- `valmiki_ramayanam_valmiki_en_processed_part01.jsonl`
+
+Use this pattern for processed corpus files, audio transcripts, manual-review datasets, and future archive/database exports so the same identifier can survive migrations.
+
 ### Internal Admin UI
 
 The repo also includes a simple server-rendered review console at:
