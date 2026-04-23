@@ -11,7 +11,7 @@
 
 ## What is DharmaGPT?
 
-DharmaGPT is an open-source, mobile-first AI application that makes the wisdom of Hindu sacred texts accessible through natural conversation. Ask life questions, hear factual story retellings, find verse references, and listen to Sanskrit chantings — all grounded in real source texts with citations.
+DharmaGPT is an open-source AI backend that powers natural-language access to the wisdom of Hindu sacred texts. Ask life questions, generate factual story retellings, find verse references, and process Sanskrit chantings — all grounded in real source texts with citations.
 
 **This is not a chatbot that makes things up.** Every answer is retrieved from indexed source texts (Valmiki Ramayana, Mahabharata, Bhagavad Gita, Upanishads, Puranas) and cited by kanda, parva, chapter, and verse.
 
@@ -33,13 +33,11 @@ DharmaGPT is an open-source, mobile-first AI application that makes the wisdom o
 ## Tech Stack
 
 ```
-Mobile App      →  React Native (Expo)
 Backend API     →  FastAPI (Python)
 LLM             →  Claude (Anthropic) via API
 Vector Search   →  Pinecone
 Embeddings      →  OpenAI text-embedding-3-large
 Audio STT/TTS   →  Sarvam AI (Saaras v3 + Bulbul v3)
-Text Sources    →  valmikiramayan.net, TTD publications, sacred-texts.com
 ```
 
 ---
@@ -54,17 +52,9 @@ dharmagpt/
 │   ├── pipelines/            # Data ingestion pipelines
 │   ├── models/               # Pydantic models
 │   └── utils/                # Helpers, logging
-├── mobile/                   # React Native (Expo) app
-│   ├── app/                  # Expo Router screens
-│   └── src/
-│       ├── components/       # Reusable UI components
-│       ├── screens/          # Screen components
-│       ├── services/         # API clients
-│       ├── store/            # Zustand state
-│       ├── hooks/            # Custom hooks
-│       └── navigation/       # Nav config
+├── mobile/                   # (optional, planned later)
 ├── scripts/
-│   ├── scraper/              # valmikiramayan.net scraper
+│   ├── scraper/              # scraper
 │   ├── audio/                # Sarvam audio pipeline
 │   └── embed/                # Pinecone embedding pipeline
 ├── data/                     # Local data (gitignored)
@@ -90,15 +80,6 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in your keys
 uvicorn api.main:app --reload --port 8000
-```
-
-### Mobile
-
-```bash
-cd mobile
-npm install
-cp .env.example .env   # set EXPO_PUBLIC_API_URL
-npx expo start
 ```
 
 ### Ingest Data
