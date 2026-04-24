@@ -8,7 +8,7 @@ Local judge stack by default:
   Sarvam-30B   -> faithfulness, citation precision
 
 Two rule-based metrics (free, no API call):
-  retrieval stats -> cosine score mean/min, source count, kanda diversity
+  retrieval stats -> cosine score mean/min, source count, section diversity
   mode_compliance -> structural format check per query mode
 
 Overall score is a weighted average of the four judge metrics.
@@ -186,12 +186,12 @@ def _build_metric(name: str, judge_data: dict, detail_key: str | None = None) ->
 
 def _compute_retrieval_stats(sources: list[SourceChunk]) -> RetrievalStats:
     scores = [s.score for s in sources]
-    unique_kandas = {s.kanda for s in sources if s.kanda}
+    unique_sections = {s.kanda for s in sources if s.kanda}
     return RetrievalStats(
         score_mean=round(statistics.mean(scores), 4) if scores else 0.0,
         score_min=round(min(scores), 4) if scores else 0.0,
         source_count=len(sources),
-        kanda_diversity=len(unique_kandas),
+        section_diversity=len(unique_sections),
     )
 
 

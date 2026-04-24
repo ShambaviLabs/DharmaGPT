@@ -36,7 +36,7 @@ class RetrievalStats:
     score_mean: float
     score_min: float
     source_count: int
-    kanda_diversity: int
+    section_diversity: int  # unique section values (kanda/parva/adhyaya/skandha depending on text)
 
 
 @dataclass
@@ -108,7 +108,7 @@ class ValidationResult:
                 "score_mean": self.retrieval.score_mean,
                 "score_min": self.retrieval.score_min,
                 "source_count": self.retrieval.source_count,
-                "kanda_diversity": self.retrieval.kanda_diversity,
+                "section_diversity": self.retrieval.section_diversity,
             },
             "mode_compliance": self.mode_compliance,
         }

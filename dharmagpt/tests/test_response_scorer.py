@@ -2,7 +2,7 @@
 test_response_scorer.py — unit tests for the response validation pipeline.
 
 Tests cover:
-  - RetrievalStats computation (mean, min, kanda diversity)
+  - RetrievalStats computation (mean, min, section diversity)
   - Mode compliance regex checks for all four query modes
   - MetricScore label thresholds (good / fair / poor)
   - Overall score weighted average and pass/fail threshold
@@ -82,18 +82,18 @@ def test_retrieval_stats_source_count():
     assert _compute_retrieval_stats(sources).source_count == 3
 
 
-def test_retrieval_stats_kanda_diversity_deduplicates():
+def test_retrieval_stats_section_diversity_deduplicates():
     sources = [
         _source(kanda="Sundara Kanda"),
         _source(kanda="Yuddha Kanda"),
         _source(kanda="Sundara Kanda"),
     ]
-    assert _compute_retrieval_stats(sources).kanda_diversity == 2
+    assert _compute_retrieval_stats(sources).section_diversity == 2
 
 
-def test_retrieval_stats_no_kanda():
+def test_retrieval_stats_no_section():
     sources = [_source(kanda=None), _source(kanda=None)]
-    assert _compute_retrieval_stats(sources).kanda_diversity == 0
+    assert _compute_retrieval_stats(sources).section_diversity == 0
 
 
 def test_retrieval_stats_empty_sources():
@@ -101,7 +101,7 @@ def test_retrieval_stats_empty_sources():
     assert stats.score_mean == 0.0
     assert stats.score_min == 0.0
     assert stats.source_count == 0
-    assert stats.kanda_diversity == 0
+    assert stats.section_diversity == 0
 
 
 # ─── Mode compliance ──────────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ def test_validation_result_to_dict_shape():
         answer_relevance=MetricScore("answer_relevance", 0.8, "On topic."),
         context_utilization=MetricScore("context_utilization", 0.7, "Good use."),
         citation_precision=MetricScore("citation_precision", 0.6, "Some issues.", {"invalid_citations": ["fake ref"]}),
-        retrieval=RetrievalStats(score_mean=0.82, score_min=0.71, source_count=3, kanda_diversity=2),
+        retrieval=RetrievalStats(score_mean=0.82, score_min=0.71, source_count=3, section_diversity=2),
         mode_compliance=True,
         overall_score=0.79,
         passed=True,
