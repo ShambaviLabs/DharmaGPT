@@ -27,8 +27,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
+    # In dev, allow all origins so the local HTML file (file://) can call the API.
+    # In production, restrict to the deployed frontend origin via CORS_ORIGINS env var.
+    allow_origins=["*"] if settings.app_env == "development" else settings.cors_origins_list,
+    allow_credentials=False,  # must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )

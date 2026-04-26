@@ -14,7 +14,22 @@
       "Bash(python -m pytest tests/unit/ tests/../tests/backend/ -x -q)",
       "Bash(python -m pytest tests/backend/ -x -q)",
       "Bash(python -m pytest tests/backend/test_rag_engine.py -x -q)",
-      "Bash(python -m pytest ../tests/backend/test_rag_engine.py -x -q)"
+      "Bash(python -m pytest ../tests/backend/test_rag_engine.py -x -q)",
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/audio/transcribe -F 'file=@c:\\\\Users\\\\sahit\\\\OneDrive\\\\Projects\\\\DharmaGPT\\\\downloads\\\\clips_29s_full\\\\01_01_sampoorna_ramayanam_part_1_by_sri_chaganti_koteswara_rao_garu\\\\01_01_sampoorna_ramayanam_part_1_by_sri_chaganti_koteswara_rao_garu_te_audio_part0000.mp3;type=audio/mpeg' -F language_code=te-IN -F 'description=01_01_sampoorna_ramayanam_part_1 chunk 1' --max-time 120)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import sys,json; data=sys.stdin.read\\(\\); lines=data.rsplit\\('\\\\n',1\\); body=lines[0]; status=lines[1] if len\\(lines\\)>1 else ''; parsed=json.loads\\(body\\); print\\(status\\); print\\('transcript:', parsed.get\\('transcript',''\\)[:200]\\); print\\('word_count:', len\\(parsed.get\\('words',[]\\)\\)\\);\")",
+      "Bash(PYTHONPATH=\"c:/Users/sahit/OneDrive/Projects/DharmaGPT/dharmagpt\" python -m uvicorn api.main:app --port 8000)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(PYTHONPATH=\"c:/Users/sahit/OneDrive/Projects/DharmaGPT/dharmagpt\" python -m uvicorn api.main:app --port 8001)",
+      "Bash(echo \"Server starting on 8001, PID: $!\")",
+      "Bash(curl -s http://localhost:8001/health)",
+      "PowerShell($f = Get-Item \"C:\\\\tmp\\\\batch_42sources.log\" -ErrorAction SilentlyContinue; if \\($f\\) { $f.LastWriteTime } else { \"not found\" })",
+      "PowerShell($f = Get-Item \"/tmp/batch_42sources.log\" -ErrorAction SilentlyContinue; if \\($f\\) { \"$\\($f.LastWriteTime\\) size=$\\($f.Length\\)\" } else { \"not found\" })",
+      "Bash(xargs grep *)",
+      "Bash(python -c \"import faster_whisper; print\\('faster_whisper ok'\\)\")",
+      "Bash(pip install *)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 8001 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Host \"Killed PID $\\($_.OwningProcess\\)\" })",
+      "Bash(python -c \"import whisper; print\\('whisper installed:', whisper.__version__\\)\")"
     ]
   }
 }

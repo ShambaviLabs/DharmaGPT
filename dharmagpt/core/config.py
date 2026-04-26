@@ -6,7 +6,11 @@ class Settings(BaseSettings):
     # App
     app_env: str = "development"
     log_level: str = "INFO"
-    cors_origins: str = "http://localhost:8081"
+    cors_origins: str = "http://localhost:8081,http://localhost:8080,http://localhost:3000,null"
+
+    @property
+    def cors_allow_all_dev(self) -> bool:
+        return self.app_env == "development"
 
     # Anthropic
     anthropic_api_key: str = ""
@@ -47,6 +51,13 @@ class Settings(BaseSettings):
     # Sarvam AI
     sarvam_api_key: str = ""
     indictrans2_model: str = "ai4bharat/indictrans2-indic-en-dist-200M"
+
+    # STT backend: "sarvam" | "claude" | "indicwhisper" | "auto" (sarvam → claude → indicwhisper)
+    stt_backend: str = "auto"
+    indicwhisper_model: str = "ai4bharat/whisper-medium-te"
+
+    # Translation: when True, try local Ollama before cloud Anthropic in auto mode
+    translation_local_first: bool = True
 
     # Manual translation review API
     manual_translation_api_key: str = ""

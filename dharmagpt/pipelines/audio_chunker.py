@@ -126,6 +126,7 @@ def _build_translation_config() -> TranslationConfig:
         ollama_model=settings.ollama_model,
         ollama_url=settings.ollama_url,
         indictrans2_model=settings.indictrans2_model,
+        local_first=settings.translation_local_first,
     )
 
 
@@ -257,8 +258,8 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
                 "description": file_metadata.get("description", stem),
                 "citation": f"Audio: {file_metadata.get('description', stem)}",
                 "word_count": len(chunk["text"].split()),
-                "transcription_mode": "sarvam_stt",
-                "transcription_version": "saaras:v3",
+                "transcription_mode": file_metadata.get("transcription_mode", "sarvam_stt"),
+                "transcription_version": file_metadata.get("transcription_version", "saaras:v3"),
                 "translation_mode": provenance["translation_mode"] or "",
                 "translation_backend": provenance["translation_backend"] or "",
                 "translation_version": provenance["translation_version"] or "",

@@ -104,6 +104,15 @@ def split_audio_to_chunks(source: Path, chunk_dir: Path, segment_seconds: int, o
     return chunks
 
 
+def expected_transcript_path(chunk_path: Path, language_tag: str) -> Path:
+    from dharmagpt.utils.naming import canonical_jsonl_filename, part_number_from_filename, source_stem_from_audio_filename
+
+    part = part_number_from_filename(chunk_path.name)
+    base = source_stem_from_audio_filename(chunk_path.name, language=language_tag)
+    fname = canonical_jsonl_filename(base, language=language_tag, kind="transcript", part=part)
+    return REPO_ROOT / "dharmagpt" / "knowledge" / "processed" / "audio_transcript" / base / fname
+
+
 def expected_transcript_name(chunk_path: Path, language_tag: str) -> str:
     from dharmagpt.utils.naming import canonical_jsonl_filename, part_number_from_filename, source_stem_from_audio_filename
 
@@ -171,7 +180,7 @@ def main() -> None:
     parser.add_argument("--segment-seconds", type=int, default=29, help="Chunk length in seconds")
     parser.add_argument("--language-code", default="te-IN", help="Sarvam language code for transcription")
     parser.add_argument("--language-tag", default="te", help="Short language tag used in filenames")
-    parser.add_argument("--api-url", default="http://localhost/api/v1/audio/transcribe", help="Local transcription API URL")
+    parser.add_argument("--api-url", default="http://localhost:8000/api/v1/audio/transcribe", help="Local transcription API URL")
     parser.add_argument("--timeout", type=int, default=1800, help="Upload timeout per chunk in seconds")
     parser.add_argument("--retries", type=int, default=3, help="Retry count for transient upload failures")
     parser.add_argument("--retry-delay", type=float, default=5.0, help="Base delay between retries in seconds")
@@ -229,7 +238,7 @@ def main() -> None:
         for chunk_idx, chunk_path in enumerate(chunks, start=1):
             total_chunks += 1
             expected_name = expected_transcript_name(chunk_path, language_tag)
-            expected_path = REPO_ROOT / "dharmagpt" / "knowledge" / "processed" / expected_name
+            expected_path = expected_transcript_path(chunk_path, language_tag)
             if expected_path.exists() and not args.overwrite:
                 print(f"  - skip {chunk_path.name} (transcript exists)")
                 source_result["chunks"].append(

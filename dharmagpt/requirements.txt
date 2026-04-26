@@ -26,6 +26,7 @@ pinecone==5.0.0
 requests==2.32.3
 python-multipart==0.0.9
 imageio-ffmpeg==0.6.0
+soundfile
 
 # Scraping + corpus
 beautifulsoup4==4.12.3

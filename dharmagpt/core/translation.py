@@ -30,6 +30,7 @@ class TranslationConfig:
     indictrans2_model: str = "ai4bharat/indictrans2-indic-en-dist-200M"
     indictrans2_src_lang: str = "tel_Telu"
     indictrans2_tgt_lang: str = "eng_Latn"
+    local_first: bool = True
 
 
 @dataclass(frozen=True)
@@ -205,12 +206,11 @@ def _translate_with_indictrans2(
     return " ".join(piece for piece in outputs if piece).strip()
 
 
-def _candidate_backends(requested_backend: TranslationBackend) -> list[TranslationBackend]:
-    preferred = [
-        TranslationBackend.anthropic,
-        TranslationBackend.ollama,
-        TranslationBackend.indictrans2,
-    ]
+def _candidate_backends(requested_backend: TranslationBackend, *, local_first: bool = True) -> list[TranslationBackend]:
+    if local_first:
+        preferred = [TranslationBackend.ollama, TranslationBackend.anthropic, TranslationBackend.indictrans2]
+    else:
+        preferred = [TranslationBackend.anthropic, TranslationBackend.ollama, TranslationBackend.indictrans2]
     if requested_backend == TranslationBackend.auto:
         return preferred
 
@@ -245,7 +245,7 @@ def translate_text(
     target_lang = _normalize_flores_lang(target_lang)
 
     requested_backend = _normalize_backend(config.backend)
-    candidates = _candidate_backends(requested_backend)
+    candidates = _candidate_backends(requested_backend, local_first=getattr(config, "local_first", True))
     attempted: list[str] = []
     fallback_reason: str | None = None
 
