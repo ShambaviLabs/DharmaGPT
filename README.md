@@ -195,7 +195,7 @@ python scripts/transcribe_audio_batch.py --input-dir data/audio/ --language-code
 
 ### Run Tests
 
-Two separate build steps — unit tests are always fast and offline; integration tests exercise the full pipeline end-to-end.
+Two separate build steps — unit tests are always fast and offline; integration tests stay offline too, but they exercise the full pipeline end-to-end with local retrieval and a local Ollama model.
 
 ```bash
 # Unit tests — no API keys required, runs in < 5s
@@ -203,8 +203,8 @@ make test-unit
 # or directly:
 cd dharmagpt && PYTHONPATH=. python -m pytest tests/unit/ -v
 
-# Integration tests — requires .env with ANTHROPIC_API_KEY, OPENAI_API_KEY, PINECONE_API_KEY
-# Tests the full path: query → embed → retrieve → generate → score
+# Integration tests — no SaaS API keys required
+# Tests the full path: query → local retrieve → local model generate → local model judge
 make test-integration
 # or directly:
 cd dharmagpt && PYTHONPATH=. python -m pytest tests/integration/ -v --timeout=120
@@ -213,7 +213,7 @@ cd dharmagpt && PYTHONPATH=. python -m pytest tests/integration/ -v --timeout=12
 make test-all
 ```
 
-Integration tests are automatically **skipped** (not failed) when credentials are absent, so they're safe to include in CI without a secrets gate.
+Integration tests are automatically **skipped** (not failed) when Ollama is unavailable, so they're safe to run locally and in CI without external API secrets.
 
 | Suite | Location | Speed | Needs credentials |
 |---|---|---|---|

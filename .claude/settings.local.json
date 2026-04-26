@@ -9,7 +9,8 @@
       "Bash(PYTHONPATH=. ../.venv/Scripts/python -m pytest tests/test_response_scorer.py -v)",
       "Bash(PYTHONPATH=. ../.venv/Scripts/python -m pytest tests/unit/ -v)",
       "Bash(curl -s http://localhost:11434/api/tags)",
-      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(m['name']\\) for m in d.get\\('models',[]\\)]\")"
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(m['name']\\) for m in d.get\\('models',[]\\)]\")",
+      "Bash(python -m pytest tests/unit/ -x -q)"
     ]
   }
 }

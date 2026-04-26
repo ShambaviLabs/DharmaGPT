@@ -20,14 +20,15 @@ class QueryRequest(BaseModel):
     mode: QueryMode = QueryMode.guidance
     history: list[ChatMessage] = Field(default_factory=list, max_length=10)
     language: str = "en"  # "en", "hi", "te", "ta", etc.
-    filter_kanda: Optional[str] = None  # e.g. "Sundara Kanda"
+    filter_section: Optional[str] = None  # e.g. "Sundara Kanda", "Adi Parva"
 
 
 class SourceChunk(BaseModel):
     text: str
     citation: str
-    kanda: Optional[str] = None
-    sarga: Optional[int] = None
+    section: Optional[str] = None   # Kanda / Parva / Adhyaya / Skandha etc.
+    chapter: Optional[int] = None   # Sarga / Adhyaya / Chapter number
+    verse: Optional[int] = None     # Shloka / verse number within the chapter
     score: float
     source_type: str = "text"  # "text" | "audio"
     audio_timestamp: Optional[str] = None
@@ -44,7 +45,7 @@ class QueryResponse(BaseModel):
 
 class AudioTranscribeRequest(BaseModel):
     language_code: str = "hi-IN"
-    kanda: Optional[str] = None
+    section: Optional[str] = None
     description: Optional[str] = None
 
 

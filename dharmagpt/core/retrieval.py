@@ -65,7 +65,7 @@ async def embed_query(text: str) -> list[float]:
 async def retrieve(
     query: str,
     top_k: int | None = None,
-    filter_kanda: str | None = None,
+    filter_section: str | None = None,
     filter_source_type: str | None = None,
 ) -> list[SourceChunk]:
     """
@@ -78,10 +78,10 @@ async def retrieve(
     pc = get_pinecone()
     index = pc.Index(settings.pinecone_index_name)
 
-    # Build metadata filter
+    # Build metadata filter — "kanda" is the legacy Pinecone field name
     pf: dict = {}
-    if filter_kanda:
-        pf["kanda"] = {"$eq": filter_kanda}
+    if filter_section:
+        pf["kanda"] = {"$eq": filter_section}
     if filter_source_type:
         pf["source_type"] = {"$eq": filter_source_type}
 
@@ -97,11 +97,16 @@ async def retrieve(
         if match.score < settings.rag_min_score:
             continue
         meta = match.metadata or {}
+        # "section"/"chapter"/"verse" are new names; fall back to legacy "kanda"/"sarga" keys
+        section = meta.get("section") or meta.get("kanda") or None
+        chapter_raw = meta.get("chapter") or meta.get("sarga")
+        verse_raw = meta.get("verse")
         chunks.append(SourceChunk(
             text=_source_text_from_metadata(meta),
-            citation=meta.get("citation", "Valmiki Ramayana"),
-            kanda=meta.get("kanda"),
-            sarga=int(meta["sarga"]) if meta.get("sarga") else None,
+            citation=meta.get("citation", ""),
+            section=section,
+            chapter=int(chapter_raw) if chapter_raw is not None else None,
+            verse=int(verse_raw) if verse_raw is not None else None,
             score=round(match.score, 4),
             source_type=meta.get("source_type", "text"),
             audio_timestamp=(
@@ -115,13 +120,29 @@ async def retrieve(
     return chunks
 
 
+def _full_citation(chunk: SourceChunk) -> str:
+    """
+    Return the richest possible citation string for a passage header.
+    Appends chapter/verse to the stored citation if they aren't already present.
+    """
+    base = chunk.citation or ""
+    extras: list[str] = []
+    if chunk.chapter is not None and str(chunk.chapter) not in base:
+        extras.append(f"Ch. {chunk.chapter}")
+    if chunk.verse is not None and str(chunk.verse) not in base:
+        extras.append(f"V. {chunk.verse}")
+    if extras:
+        return f"{base}, {', '.join(extras)}".strip(", ")
+    return base
+
+
 def format_context(chunks: list[SourceChunk], max_chars: int | None = None) -> str:
     """Format retrieved chunks into a context block for the LLM prompt."""
     max_chars = max_chars or settings.max_context_chars
     parts = []
     total = 0
     for i, chunk in enumerate(chunks, 1):
-        src = f"[PASSAGE {i} — {chunk.citation}]"
+        src = f"[PASSAGE {i} — {_full_citation(chunk)}]"
         if chunk.source_type == "audio" and chunk.audio_timestamp:
             src += f" [Audio @ {chunk.audio_timestamp}]"
         block = f"{src}\n{chunk.text}"

@@ -160,14 +160,18 @@ def build_metadata(record: dict, dataset_id: str) -> dict:
         "has_english": bool(text_en.strip()),
         "dataset_id": dataset_id,
     }
-    if record.get("kanda"):
-        meta["kanda"] = record["kanda"]
-    if record.get("sarga") is not None:
-        meta["sarga"] = int(record["sarga"])
-    if record.get("verse_start") is not None:
-        meta["verse_start"] = int(record["verse_start"])
-    if record.get("verse_end") is not None:
-        meta["verse_end"] = int(record["verse_end"])
+    section = record.get("section") or record.get("kanda")
+    chapter = record.get("chapter") if record.get("chapter") is not None else record.get("sarga")
+    verse = record.get("verse") if record.get("verse") is not None else record.get("verse_start")
+
+    if section:
+        meta["section"] = section
+        meta["kanda"] = section  # keep legacy key so existing filter queries still work
+    if chapter is not None:
+        meta["chapter"] = int(chapter)
+        meta["sarga"] = int(chapter)  # keep legacy key
+    if verse is not None:
+        meta["verse"] = int(verse)
     return meta
 
 

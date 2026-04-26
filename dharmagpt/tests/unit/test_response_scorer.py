@@ -32,15 +32,20 @@ from models.schemas import QueryMode, QueryResponse, SourceChunk
 
 def _source(
     score: float = 0.85,
-    kanda: str | None = "Sundara Kanda",
-    sarga: int | None = 15,
+    section: str | None = "Sundara Kanda",
+    chapter: int | None = 15,
     text: str = "Hanuman leapt across the ocean.",
 ) -> SourceChunk:
+    citation = "Valmiki Ramayana"
+    if section and chapter:
+        citation = f"Valmiki Ramayana, {section}, Sarga {chapter}"
+    elif section:
+        citation = f"Valmiki Ramayana, {section}"
     return SourceChunk(
         text=text,
-        citation="Valmiki Ramayana",
-        kanda=kanda,
-        sarga=sarga,
+        citation=citation,
+        section=section,
+        chapter=chapter,
         score=score,
     )
 
@@ -84,15 +89,15 @@ def test_retrieval_stats_source_count():
 
 def test_retrieval_stats_section_diversity_deduplicates():
     sources = [
-        _source(kanda="Sundara Kanda"),
-        _source(kanda="Yuddha Kanda"),
-        _source(kanda="Sundara Kanda"),
+        _source(section="Sundara Kanda"),
+        _source(section="Yuddha Kanda"),
+        _source(section="Sundara Kanda"),
     ]
     assert _compute_retrieval_stats(sources).section_diversity == 2
 
 
 def test_retrieval_stats_no_section():
-    sources = [_source(kanda=None), _source(kanda=None)]
+    sources = [_source(section=None), _source(section=None)]
     assert _compute_retrieval_stats(sources).section_diversity == 0
 
 
@@ -205,15 +210,15 @@ def test_format_passages_empty():
 
 
 def test_format_passages_includes_text_and_location():
-    sources = [_source(text="Sita was found.", kanda="Sundara Kanda", sarga=15)]
+    sources = [_source(text="Sita was found.", section="Sundara Kanda", chapter=15)]
     formatted = _format_passages_for_judge(sources)
     assert "Sita was found." in formatted
     assert "Sundara Kanda" in formatted
     assert "Sarga 15" in formatted
 
 
-def test_format_passages_fallback_to_citation_when_no_kanda():
-    sources = [_source(kanda=None, sarga=None)]
+def test_format_passages_fallback_to_citation_when_no_section():
+    sources = [_source(section=None, chapter=None)]
     formatted = _format_passages_for_judge(sources)
     assert "Valmiki Ramayana" in formatted
 

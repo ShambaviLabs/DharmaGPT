@@ -252,7 +252,7 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
                 "end_time_sec": chunk.get("end") or "",
                 "speaker_type": chunk["speaker"],
                 "has_shloka": chunk["has_shloka"],
-                "kanda": file_metadata.get("kanda") or "",
+                "section": file_metadata.get("section") or "",
                 "language": file_metadata.get("language_code", "hi-IN"),
                 "description": file_metadata.get("description", stem),
                 "citation": f"Audio: {file_metadata.get('description', stem)}",

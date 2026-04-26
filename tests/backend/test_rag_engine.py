@@ -13,8 +13,8 @@ def make_source(citation="Valmiki Ramayana, Sundara Kanda, Sarga 15", score=0.9)
     return SourceChunk(
         text="Hanuman found Sita in the Ashoka grove.",
         citation=citation,
-        kanda="Sundara Kanda",
-        sarga=15,
+        section="Sundara Kanda",
+        chapter=15,
         score=score,
         source_type="text",
         audio_timestamp=None,

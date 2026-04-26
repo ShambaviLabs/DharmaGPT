@@ -165,23 +165,32 @@ def scraped_to_schema(raw: dict, filename: str) -> dict | None:
     # Detect if chunk contains Sanskrit verse markers
     has_shloka = bool(re.search(r"[।॥|ā ī ū ṛ ṭ ḍ ṇ ṅ ñ ṃ ḥ]", text))
 
-    kanda = meta.get("kanda", "")
-    sarga = meta.get("sarga")
-    verse_index = meta.get("verse_index")
+    section = meta.get("kanda", "")
+    chapter = meta.get("sarga")
+    verse = meta.get("verse_index")
 
-    # Build deterministic id from kanda + sarga + verse
-    kanda_slug = kanda.lower().replace(" ", "_").replace("kanda", "kanda")
-    chunk_id = raw.get("id") or f"{kanda_slug}_s{sarga or 0:03d}_v{verse_index or 0:03d}"
+    # Build deterministic id from section + chapter + verse
+    section_slug = section.lower().replace(" ", "_")
+    chunk_id = raw.get("id") or f"{section_slug}_s{chapter or 0:03d}_v{verse or 0:03d}"
+
+    # Build a full citation: always include section, chapter when known, verse when known
+    citation_parts = ["Valmiki Ramayana"]
+    if section:
+        citation_parts.append(section)
+    if chapter is not None:
+        citation_parts.append(f"Sarga {chapter}")
+    if verse is not None:
+        citation_parts.append(f"Verse {verse}")
+    citation = ", ".join(citation_parts)
 
     return {
         "id": chunk_id,
         "text": text,
         "source": "valmiki_ramayana",
-        "kanda": kanda,
-        "sarga": sarga,
-        "verse_start": verse_index,
-        "verse_end": verse_index,
-        "citation": meta.get("citation", f"Valmiki Ramayana, {kanda}"),
+        "section": section,
+        "chapter": chapter,
+        "verse": verse,
+        "citation": citation,
         "language": "en",           # scraped site is English translation + some Sanskrit
         "source_type": meta.get("source_type", "text"),
         "tags": tags,
@@ -193,18 +202,18 @@ def scraped_to_schema(raw: dict, filename: str) -> dict | None:
     }
 
 
-def slugify_kanda(name: str) -> str:
-    slug = (name or "unknown_kanda").strip().lower()
+def slugify_section(name: str) -> str:
+    slug = (name or "unknown_section").strip().lower()
     slug = re.sub(r"[^a-z0-9]+", "_", slug)
     slug = re.sub(r"_+", "_", slug).strip("_")
-    return slug or "unknown_kanda"
+    return slug or "unknown_section"
 
 
 def partition_dir_for(record: dict) -> Path:
     source_type = (record.get("source_type") or "text").strip().lower()
     source = (record.get("source") or "unknown_source").strip().lower().replace(" ", "_")
-    kanda_slug = slugify_kanda(str(record.get("kanda") or "unknown_kanda"))
-    return PROCESSED_DIR / source_type / source / kanda_slug
+    section_slug = slugify_section(str(record.get("section") or record.get("kanda") or "unknown_section"))
+    return PROCESSED_DIR / source_type / source / section_slug
 
 
 def write_partitioned_records(records: list[dict], partition_size: int, naming: dict[str, str]) -> list[Path]:
@@ -246,7 +255,7 @@ def write_partitioned_records(records: list[dict], partition_size: int, naming: 
 def _naming_context(src: Path, records: list[dict], source: str | None, title: str | None, author: str | None, language: str | None, kind: str | None) -> dict[str, str]:
     first = records[0] if records else {}
     resolved_source = source or (first.get("source") if isinstance(first.get("source"), str) else None) or src.stem
-    resolved_title = title or (str(first.get("kanda")) if first.get("kanda") else None) or src.stem
+    resolved_title = title or (str(first.get("section") or first.get("kanda")) if (first.get("section") or first.get("kanda")) else None) or src.stem
     resolved_author = author or (str(first.get("author")) if first.get("author") else None)
     resolved_language = language or (str(first.get("language")) if first.get("language") else None) or "en"
     resolved_kind = kind or (str(first.get("source_type")) if first.get("source_type") else None) or "processed"

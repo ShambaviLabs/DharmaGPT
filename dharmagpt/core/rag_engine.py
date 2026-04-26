@@ -40,7 +40,7 @@ async def answer(request: QueryRequest) -> QueryResponse:
     # 1. Retrieve
     chunks: list[SourceChunk] = await retrieve(
         query=request.query,
-        filter_kanda=request.filter_kanda,
+        filter_section=request.filter_section,
     )
 
     # 2. Format context

@@ -127,8 +127,8 @@ verse contents) in the answer are directly supported by the retrieved passages a
 Claims that come only from model training data - not from the passages - must be flagged
 as unsupported. Score 1.0 only if every factual claim is traceable to a passage.
 
-citation_precision (0-1): What fraction of inline citations of the form [Text, Kanda,
-Sarga/Chapter X] are accurate and traceable to the retrieved passages? If the answer
+citation_precision (0-1): What fraction of inline citations of the form [Text, Section,
+Chapter/Verse X] are accurate and traceable to the retrieved passages? If the answer
 makes specific claims without any citations at all, score 0.0.
 """,
 }
@@ -151,11 +151,7 @@ def _format_passages_for_judge(sources: list[SourceChunk]) -> str:
         return "[No passages were retrieved for this query]"
     parts = []
     for i, s in enumerate(sources, 1):
-        if s.kanda and s.sarga:
-            location = f"{s.kanda}, Sarga {s.sarga}"
-        else:
-            location = s.kanda or s.citation
-        parts.append(f"[{i}] {location} (retrieval score={s.score})\n{s.text}")
+        parts.append(f"[{i}] {s.citation} (retrieval score={s.score})\n{s.text}")
     return "\n\n".join(parts)
 
 
@@ -189,7 +185,7 @@ def _build_metric(name: str, judge_data: dict, detail_key: str | None = None) ->
 
 def _compute_retrieval_stats(sources: list[SourceChunk]) -> RetrievalStats:
     scores = [s.score for s in sources]
-    unique_sections = {s.kanda for s in sources if s.kanda}
+    unique_sections = {s.section for s in sources if s.section}
     return RetrievalStats(
         score_mean=round(statistics.mean(scores), 4) if scores else 0.0,
         score_min=round(min(scores), 4) if scores else 0.0,

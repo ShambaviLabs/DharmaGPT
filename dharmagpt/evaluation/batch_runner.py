@@ -31,7 +31,7 @@ def load_questions(path: Path) -> list[dict]:
     """Read a JSONL file of evaluation questions.
 
     Each non-blank line must be a JSON object with at minimum a "query" key.
-    Optional keys: "mode" (defaults to "guidance"), "filter_kanda".
+    Optional keys: "mode" (defaults to "guidance"), "filter_section".
     Lines beginning with "//" are treated as comments and skipped.
     """
     questions: list[dict] = []
@@ -47,7 +47,7 @@ async def _evaluate_one(q: dict) -> ValidationResult:
     request = QueryRequest(
         query=q["query"],
         mode=QueryMode(q.get("mode", "guidance")),
-        filter_kanda=q.get("filter_kanda"),
+        filter_section=q.get("filter_section"),
     )
     response = await answer(request)
     # validate_response is synchronous (two blocking local judge calls by default) - run in thread

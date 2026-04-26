@@ -14,9 +14,9 @@ from models.schemas import QueryMode, QueryRequest, SourceChunk
 def sample_source():
     return SourceChunk(
         text="Hanuman leapt across the ocean with the strength of devotion.",
-        citation="Valmiki Ramayana",
-        kanda="Sundara Kanda",
-        sarga=1,
+        citation="Valmiki Ramayana, Sundara Kanda, Sarga 1",
+        section="Sundara Kanda",
+        chapter=1,
         score=0.88,
         source_type="text",
     )
@@ -28,17 +28,17 @@ def sample_sources(sample_source):
         sample_source,
         SourceChunk(
             text="Rama stood firm in dharma even in exile.",
-            citation="Valmiki Ramayana",
-            kanda="Ayodhya Kanda",
-            sarga=20,
+            citation="Valmiki Ramayana, Ayodhya Kanda, Sarga 20",
+            section="Ayodhya Kanda",
+            chapter=20,
             score=0.76,
             source_type="text",
         ),
         SourceChunk(
             text="Sita endured with grace, her faith in Rama unwavering.",
-            citation="Valmiki Ramayana",
-            kanda="Sundara Kanda",
-            sarga=15,
+            citation="Valmiki Ramayana, Sundara Kanda, Sarga 15",
+            section="Sundara Kanda",
+            chapter=15,
             score=0.71,
             source_type="text",
         ),

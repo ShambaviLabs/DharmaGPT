@@ -1,30 +1,27 @@
-"""
-conftest.py — fixtures and skip guards for integration tests.
+"""Shared fixtures for the offline integration suite."""
 
-All integration tests require live credentials. Any test in this directory
-is automatically skipped if any required environment variable is missing —
-this means they're safe to collect in CI without credentials, they'll just
-be reported as skipped rather than failing.
-"""
+from __future__ import annotations
 
-import os
 import pytest
 
-REQUIRED_ENV_VARS = [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "PINECONE_API_KEY",
-]
+from .local_pipeline import ollama_available
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip all integration tests when credentials are absent."""
-    missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
-    if not missing:
+    """Skip offline integration tests when the local Ollama service is unavailable."""
+    if ollama_available():
         return
-    skip = pytest.mark.skip(
-        reason=f"Integration tests require env vars: {', '.join(missing)}"
-    )
+
+    skip = pytest.mark.skip(reason="Integration tests require local Ollama with the configured model")
     for item in items:
         if "integration" in str(item.fspath):
             item.add_marker(skip)
+
+
+@pytest.fixture()
+def offline_pipeline(monkeypatch):
+    """Patch the RAG path so integration tests use local retrieval + local Ollama."""
+    from .local_pipeline import local_call_llm_async, local_retrieve
+
+    monkeypatch.setattr("core.rag_engine.retrieve", local_retrieve)
+    monkeypatch.setattr("core.rag_engine._call_llm", local_call_llm_async)

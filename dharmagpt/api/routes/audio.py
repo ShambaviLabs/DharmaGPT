@@ -23,7 +23,7 @@ TRANSCRIPT_DIR = PROCESSED_DIR / "audio_transcript"
 async def transcribe_audio(
     file: UploadFile = File(...),
     language_code: str = Form("hi-IN"),
-    kanda: str = Form(None),
+    section: str = Form(None),
     description: str = Form(None),
 ) -> AudioTranscribeResponse:
     """
@@ -66,7 +66,7 @@ async def transcribe_audio(
     # Chunk and index
     file_metadata = {
         "language_code": language_code,
-        "kanda": kanda,
+        "section": section,
         "description": description or file.filename,
         "text_source": "Valmiki Ramayana",
         "source_file": file.filename,
@@ -88,7 +88,7 @@ async def transcribe_audio(
         "text": transcript_text,
         "text_en": chunk_result.get("translated_transcript"),
         "source": transcript_base,
-        "kanda": kanda,
+        "section": section,
         "citation": f"Audio transcription: {description or file.filename}",
         "language": transcript_language,
         "source_type": "audio_transcript",

@@ -9,7 +9,7 @@ PYTHONPATH_SET := PYTHONPATH=.
 test-unit:
 	cd dharmagpt && $(PYTHONPATH_SET) $(PYTEST) tests/unit/ -v
 
-## Run full end-to-end integration tests (requires .env with API keys)
+## Run full end-to-end integration tests (requires local Ollama)
 .PHONY: test-integration
 test-integration:
 	cd dharmagpt && $(PYTHONPATH_SET) $(PYTEST) tests/integration/ -v --timeout=120
