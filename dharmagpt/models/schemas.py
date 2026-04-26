@@ -83,3 +83,4 @@ class HealthResponse(BaseModel):
     pinecone: bool
     anthropic: bool
     sarvam: bool
+    vector_name: str

@@ -1,9 +1,199 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+import json
+import re
+import uuid
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from core.config import get_settings
+from core.local_vector_store import upsert_vectors
+from core.retrieval import get_openai, get_pinecone
+
 router = APIRouter()
+settings = get_settings()
+
+
+def _normalize_text(raw: str) -> str:
+  return re.sub(r"\s+", " ", raw).strip()
+
+
+def _chunk_text(raw: str, max_chars: int = 1200) -> list[str]:
+  text = _normalize_text(raw)
+  if not text:
+    return []
+
+  # Split first on paragraph breaks, then fold into bounded chunks.
+  paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
+  if not paragraphs:
+    paragraphs = [text]
+
+  chunks: list[str] = []
+  buf = ""
+  for para in paragraphs:
+    para = _normalize_text(para)
+    if not para:
+      continue
+
+    if len(para) > max_chars:
+      sentences = re.split(r"(?<=[.!?])\s+", para)
+      for sentence in sentences:
+        sentence = _normalize_text(sentence)
+        if not sentence:
+          continue
+        if not buf:
+          buf = sentence
+        elif len(buf) + 1 + len(sentence) <= max_chars:
+          buf += " " + sentence
+        else:
+          chunks.append(buf)
+          buf = sentence
+      continue
+
+    if not buf:
+      buf = para
+    elif len(buf) + 1 + len(para) <= max_chars:
+      buf += " " + para
+    else:
+      chunks.append(buf)
+      buf = para
+
+  if buf:
+    chunks.append(buf)
+
+  return chunks
+
+
+def _extract_text(filename: str, raw: bytes) -> str:
+  suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else "txt"
+  decoded = raw.decode("utf-8", errors="ignore")
+
+  if suffix in {"txt", "md", "rst", "csv", "tsv"}:
+    return decoded
+
+  if suffix == "jsonl":
+    lines: list[str] = []
+    for line in decoded.splitlines():
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        obj = json.loads(line)
+      except json.JSONDecodeError:
+        lines.append(line)
+        continue
+      if isinstance(obj, dict):
+        val = obj.get("text") or obj.get("content") or obj.get("body") or obj.get("text_en") or ""
+        if val:
+          lines.append(str(val))
+    return "\n".join(lines)
+
+  if suffix == "json":
+    try:
+      obj = json.loads(decoded)
+    except json.JSONDecodeError:
+      return decoded
+    if isinstance(obj, dict):
+      return str(obj.get("text") or obj.get("content") or obj.get("body") or decoded)
+    if isinstance(obj, list):
+      parts: list[str] = []
+      for item in obj:
+        if isinstance(item, dict):
+          val = item.get("text") or item.get("content") or item.get("body") or ""
+          if val:
+            parts.append(str(val))
+        elif isinstance(item, str):
+          parts.append(item)
+      return "\n".join(parts)
+    return decoded
+
+  return decoded
+
+
+@router.post("/admin/vector/upload")
+async def upload_document_to_vector_db(
+  file: UploadFile = File(...),
+  vector_db: str = Form("local"),
+  index_name: str = Form(""),
+  namespace: str = Form(""),
+) -> dict:
+  vector_db = (vector_db or "local").strip().lower()
+  if vector_db not in {"local", "pinecone"}:
+    raise HTTPException(status_code=400, detail="vector_db must be 'local' or 'pinecone'")
+
+  filename = file.filename or "upload.txt"
+  raw = await file.read()
+  if not raw:
+    raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+  text = _extract_text(filename, raw)
+  chunks = _chunk_text(text)
+  if not chunks:
+    raise HTTPException(status_code=400, detail="Could not extract usable text from uploaded file")
+
+  client = get_openai()
+  embed_response = await client.embeddings.create(model=settings.embedding_model, input=chunks)
+  vectors = [row.embedding for row in embed_response.data]
+
+  if vector_db == "local":
+    default_index = settings.local_vector_index_name
+    default_namespace = settings.local_vector_namespace
+  else:
+    default_index = settings.pinecone_index_name
+    default_namespace = ""
+
+  target_index = (index_name or default_index).strip()
+  if not target_index:
+    raise HTTPException(status_code=400, detail="index_name is required")
+
+  target_namespace = (namespace or default_namespace).strip()
+
+  records = []
+  doc_id = uuid.uuid4().hex[:12]
+  for i, (chunk, vec) in enumerate(zip(chunks, vectors), start=1):
+    records.append(
+      {
+        "id": f"admin-doc-{doc_id}-{i}",
+        "values": vec,
+        "metadata": {
+          "text": chunk,
+          "source_type": "admin_upload",
+          "citation": f"Admin upload: {filename}",
+          "document_name": filename,
+          "chunk_index": i,
+        },
+      }
+    )
+
+  batch_size = 50
+  upserted = 0
+  if vector_db == "local":
+    upserted = upsert_vectors(
+      index_name=target_index,
+      namespace=target_namespace,
+      records=records,
+    )
+  else:
+    pc = get_pinecone()
+    index = pc.Index(target_index)
+    for i in range(0, len(records), batch_size):
+      batch = records[i : i + batch_size]
+      if target_namespace:
+        index.upsert(vectors=batch, namespace=target_namespace)
+      else:
+        index.upsert(vectors=batch)
+      upserted += len(batch)
+
+  return {
+    "status": "ok",
+    "vector_db": vector_db,
+    "index_name": target_index,
+    "namespace": target_namespace,
+    "document": filename,
+    "chunks_created": len(chunks),
+    "vectors_upserted": upserted,
+  }
 
 
 def _feedback_page() -> str:
@@ -122,6 +312,29 @@ def _feedback_page() -> str:
     <div class="topbar">
       <h1>Gold Store Dashboard</h1>
       <a class="nav-link" href="/docs" style="color: var(--muted); font-size: 13px; text-decoration: none; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px;">API Docs</a>
+    </div>
+
+    <div class="controls" style="align-items: center;">
+      <div class="field" style="min-width: 180px;">
+        <label for="vectorDb">Vector DB</label>
+        <select id="vectorDb" style="border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); padding: 10px 14px;">
+          <option value="local" selected>Local (Beta)</option>
+          <option value="pinecone">Pinecone (Later)</option>
+        </select>
+      </div>
+      <div class="field" style="min-width: 220px;">
+        <label for="indexName">Index Name</label>
+        <input id="indexName" type="text" placeholder="dharma-local" />
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="namespace">Namespace</label>
+        <input id="namespace" type="text" placeholder="optional" />
+      </div>
+      <div class="field" style="min-width: 240px;">
+        <label for="docFile">Document File</label>
+        <input id="docFile" type="file" />
+      </div>
+      <button class="btn-primary" id="uploadBtn" style="margin-top: 18px;">Upload & Index</button>
     </div>
 
     <div class="controls">
@@ -282,7 +495,47 @@ def _feedback_page() -> str:
         render();
       } catch(e) { setNotice(e.message, true); }
     }
+
+    async function uploadDocument() {
+      const fileInput = document.getElementById("docFile");
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        setNotice("Please choose a document file first.", true);
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("vector_db", document.getElementById("vectorDb").value || "local");
+      fd.append("index_name", document.getElementById("indexName").value || "");
+      fd.append("namespace", document.getElementById("namespace").value || "");
+
+      setNotice("Uploading and indexing document...");
+      try {
+        const resp = await fetch("/admin/vector/upload", {
+          method: "POST",
+          body: fd,
+        });
+        if (!resp.ok) {
+          let msg = resp.statusText;
+          try {
+            const body = await resp.json();
+            if (body && body.detail) msg = body.detail;
+          } catch (_) {}
+          throw new Error(msg);
+        }
+        const data = await resp.json();
+        setNotice(
+          "Indexed " + data.vectors_upserted + " chunks into " + data.vector_db + ":" + data.index_name +
+          (data.namespace ? (" (namespace: " + data.namespace + ")") : "") + "."
+        );
+      } catch (e) {
+        setNotice("Upload failed: " + e.message, true);
+      }
+    }
+
     document.getElementById("loadBtn").addEventListener("click", load);
+    document.getElementById("uploadBtn").addEventListener("click", uploadDocument);
     load();
   </script>
 </body>

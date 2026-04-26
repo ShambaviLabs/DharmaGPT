@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     pinecone_index_name: str = "dharma-gpt"
     pinecone_environment: str = "us-east-1"
 
+    # Vector DB backend
+    vector_db_backend: str = "local"  # local | pinecone
+    local_vector_index_name: str = "dharma-local"
+    local_vector_namespace: str = "default"
+
     # Sarvam AI
     sarvam_api_key: str = ""
     indictrans2_model: str = "ai4bharat/indictrans2-indic-en-dist-200M"

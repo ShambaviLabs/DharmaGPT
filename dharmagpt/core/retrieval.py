@@ -3,6 +3,7 @@ from pinecone import Pinecone
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 from core.config import get_settings
+from core.local_vector_store import query_vectors
 from models.schemas import SourceChunk
 
 log = structlog.get_logger()
@@ -69,34 +70,54 @@ async def retrieve(
     filter_source_type: str | None = None,
 ) -> list[SourceChunk]:
     """
-    Embed query and retrieve top-k chunks from Pinecone.
+    Embed query and retrieve top-k chunks from configured vector DB.
     Returns SourceChunk list sorted by relevance score.
     """
     top_k = top_k or settings.rag_top_k
     vector = await embed_query(query)
 
-    pc = get_pinecone()
-    index = pc.Index(settings.pinecone_index_name)
+    matches: list[dict]
+    if settings.vector_db_backend.lower() == "local":
+        matches = query_vectors(
+            vector=vector,
+            top_k=top_k,
+            min_score=settings.rag_min_score,
+            index_name=settings.local_vector_index_name,
+            namespace=settings.local_vector_namespace,
+            filter_section=filter_section,
+            filter_source_type=filter_source_type,
+        )
+    else:
+        pc = get_pinecone()
+        index = pc.Index(settings.pinecone_index_name)
 
-    # Build metadata filter — "kanda" is the legacy Pinecone field name
-    pf: dict = {}
-    if filter_section:
-        pf["kanda"] = {"$eq": filter_section}
-    if filter_source_type:
-        pf["source_type"] = {"$eq": filter_source_type}
+        # Build metadata filter — "kanda" is the legacy Pinecone field name
+        pf: dict = {}
+        if filter_section:
+            pf["kanda"] = {"$eq": filter_section}
+        if filter_source_type:
+            pf["source_type"] = {"$eq": filter_source_type}
 
-    results = index.query(
-        vector=vector,
-        top_k=top_k,
-        include_metadata=True,
-        filter=pf if pf else None,
-    )
+        results = index.query(
+            vector=vector,
+            top_k=top_k,
+            include_metadata=True,
+            filter=pf if pf else None,
+        )
+        matches = [
+            {
+                "score": match.score,
+                "metadata": match.metadata or {},
+            }
+            for match in results.matches
+        ]
 
     chunks = []
-    for match in results.matches:
-        if match.score < settings.rag_min_score:
+    for match in matches:
+        score = float(match.get("score") or 0.0)
+        if score < settings.rag_min_score:
             continue
-        meta = match.metadata or {}
+        meta = match.get("metadata") or {}
         # "section"/"chapter"/"verse" are new names; fall back to legacy "kanda"/"sarga" keys
         section = meta.get("section") or meta.get("kanda") or None
         chapter_raw = meta.get("chapter") or meta.get("sarga")
@@ -107,7 +128,7 @@ async def retrieve(
             section=section,
             chapter=int(chapter_raw) if chapter_raw is not None else None,
             verse=int(verse_raw) if verse_raw is not None else None,
-            score=round(match.score, 4),
+            score=round(score, 4),
             source_type=meta.get("source_type", "text"),
             audio_timestamp=(
                 f"{meta.get('start_time_sec', '')}s–{meta.get('end_time_sec', '')}s"
