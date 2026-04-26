@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 from functools import lru_cache
-from pathlib import Path
 
 import requests
 
@@ -13,7 +11,6 @@ from models.schemas import SourceChunk
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b")
-CORPUS_PATH = Path(__file__).resolve().parent / "seed_corpus.jsonl"
 
 _STOPWORDS = {
     "a",
@@ -46,17 +43,93 @@ _STOPWORDS = {
     "your",
 }
 
+_SEED_CORPUS_FALLBACK: tuple[dict, ...] = (
+    {
+        "id": "ramayana_hanuman_lanka_001",
+        "text": "After crossing the great ocean, Hanuman reaches Lanka in search of Sita. He reflects on the mission of Rama and the need for stealth, courage, and discipline. The episode captures focused action in service of dharma.",
+        "citation": "Valmiki Ramayana, Sundara Kanda, Sarga 2",
+        "kanda": "Sundara Kanda",
+        "sarga": 2,
+        "verse_start": 1,
+        "verse_end": 12,
+        "language": "en",
+        "source_type": "text",
+        "topics": ["Hanuman", "courage", "dharma", "stealth"],
+        "characters": ["Hanuman"],
+        "tags": ["story", "devotion"],
+        "is_shloka": False,
+        "url": "https://example.com/ramayana/sundara-2",
+    },
+    {
+        "id": "ramayana_sita_search_001",
+        "text": "Hanuman finds Sita in the Ashoka grove, thin from grief yet steadfast in resolve. He bows to her and speaks gently, assuring her that Rama has not abandoned the search.",
+        "citation": "Valmiki Ramayana, Sundara Kanda, Sarga 15",
+        "kanda": "Sundara Kanda",
+        "sarga": 15,
+        "verse_start": 1,
+        "verse_end": 20,
+        "language": "en",
+        "source_type": "text",
+        "topics": ["Sita", "Hanuman", "devotion", "steadfastness"],
+        "characters": ["Hanuman", "Sita"],
+        "tags": ["story", "devotion"],
+        "is_shloka": False,
+        "url": "https://example.com/ramayana/sundara-15",
+    },
+    {
+        "id": "gita_karma_001",
+        "text": "You have a right to action, not to the fruits of action. Do your duty without attachment to results, and let discipline guide your work.",
+        "citation": "Bhagavad Gita, Chapter 2, Verse 47",
+        "kanda": "Bhishma Parva",
+        "sarga": 2,
+        "verse_start": 47,
+        "verse_end": 47,
+        "language": "sa",
+        "source_type": "text",
+        "topics": ["karma", "duty", "detachment", "discipline"],
+        "characters": ["Krishna", "Arjuna"],
+        "tags": ["shloka", "upadesha"],
+        "is_shloka": True,
+        "url": "https://example.com/gita/2/47",
+    },
+    {
+        "id": "mahabharata_rajadharma_001",
+        "text": "Bhishma teaches that dharma is subtle and that a king must protect the people with wisdom, restraint, and responsibility. The best ruler balances compassion and firmness.",
+        "citation": "Mahabharata, Shanti Parva, Chapter 109",
+        "kanda": "Shanti Parva",
+        "sarga": 109,
+        "verse_start": 1,
+        "verse_end": 20,
+        "language": "en",
+        "source_type": "text",
+        "topics": ["king", "rajadharma", "dharma", "leadership"],
+        "characters": ["Bhishma", "Yudhishthira"],
+        "tags": ["ethics", "upadesha"],
+        "is_shloka": False,
+        "url": "https://example.com/mahabharata/shanti-109",
+    },
+    {
+        "id": "upanishad_awake_001",
+        "text": "Arise, awake, and stop not until the goal is reached. The wise speak of the path as sharp as a razor's edge, demanding focus and courage.",
+        "citation": "Katha Upanishad, Valli 3, Verse 14",
+        "kanda": None,
+        "sarga": 3,
+        "verse_start": 14,
+        "verse_end": 14,
+        "language": "sa",
+        "source_type": "text",
+        "topics": ["awakening", "effort", "wisdom"],
+        "characters": ["Nachiketa", "Yama"],
+        "tags": ["upadesha", "jnana"],
+        "is_shloka": True,
+        "url": "https://example.com/katha/3/14",
+    },
+)
+
 
 @lru_cache(maxsize=1)
 def load_seed_corpus() -> tuple[dict, ...]:
-    records: list[dict] = []
-    with CORPUS_PATH.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-    return tuple(records)
+    return _SEED_CORPUS_FALLBACK
 
 
 def ollama_config(model: str | None = None) -> LLMConfig:
