@@ -47,3 +47,6 @@ logs/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Local docs (blog drafts, notes — not for repo)
+docs/

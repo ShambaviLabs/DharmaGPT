@@ -10,7 +10,11 @@
       "Bash(PYTHONPATH=. ../.venv/Scripts/python -m pytest tests/unit/ -v)",
       "Bash(curl -s http://localhost:11434/api/tags)",
       "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(m['name']\\) for m in d.get\\('models',[]\\)]\")",
-      "Bash(python -m pytest tests/unit/ -x -q)"
+      "Bash(python -m pytest tests/unit/ -x -q)",
+      "Bash(python -m pytest tests/unit/ tests/../tests/backend/ -x -q)",
+      "Bash(python -m pytest tests/backend/ -x -q)",
+      "Bash(python -m pytest tests/backend/test_rag_engine.py -x -q)",
+      "Bash(python -m pytest ../tests/backend/test_rag_engine.py -x -q)"
     ]
   }
 }

@@ -13,7 +13,7 @@ from models.schemas import SourceChunk
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b")
-CORPUS_PATH = Path(__file__).resolve().parents[2] / "knowledge" / "processed" / "seed_corpus.jsonl"
+CORPUS_PATH = Path(__file__).resolve().parent / "seed_corpus.jsonl"
 
 _STOPWORDS = {
     "a",

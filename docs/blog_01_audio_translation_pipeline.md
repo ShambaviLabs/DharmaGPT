@@ -63,7 +63,7 @@ Long audio file (pravachanam recording)
     ↓ translate Telugu → English (auto: Anthropic → Ollama → IndicTrans2)
     ↓ embed text (OpenAI text-embedding-3-large, 3072d)
     ↓ upsert to Pinecone
-    
+
 User query
     ↓ embed query (same model)
     ↓ retrieve top-5 chunks from Pinecone (cosine similarity, min score 0.35)
@@ -100,9 +100,9 @@ The translation abstraction tries backends in sequence:
 4. skip                         ← explicit no-op
 ```
 
-**Auto mode** tries them in this order. Each failure writes a `translation_fallback_reason` so you can audit what happened per record. In practice, building a 189-record corpus revealed this failure chain concretely: Anthropic failed for 71 records during one batch run (rate limit / no key), Ollama picked up 118 of them cleanly, and 71 needed a second pass after the environment was fixed.
+**Auto mode** tries them in this order. Each failure writes a `translation_fallback_reason` so you can audit what happened per record. In practice, building a 189-record corpus revealed this failure chain concretely: Anthropic failed for 71 records during one batch run, Ollama picked up 118 of them cleanly, and 71 needed a second pass after the environment was fixed.
 
-Every translated record now stores both field names for compatibility:
+Every translated record stores both field names for compatibility:
 
 ```json
 {
@@ -162,7 +162,7 @@ This improves the system in three ways:
 
 ## Response Validation: Did the AI Actually Use the Sources?
 
-The hardest problem in RAG is not retrieval — it is knowing whether the generated answer is actually grounded in what was retrieved, or whether the model fabricated a plausible-sounding answer from training data.
+The hardest problem in RAG is not retrieval — it is knowing whether the generated answer is actually grounded in what was retrieved, or whether the model fabricated a plausible-sounding answer from training data while ignoring the retrieved context entirely.
 
 We built a validation pipeline that scores every response across four dimensions:
 
@@ -171,7 +171,7 @@ We built a validation pipeline that scores every response across four dimensions
 | **Faithfulness** | 35% | Are factual claims in the answer traceable to the retrieved passages? |
 | **Answer relevance** | 30% | Does the answer directly address the query? |
 | **Context utilization** | 20% | Did the answer use the retrieved passages or ignore them? |
-| **Citation precision** | 15% | Are inline citations like `[Valmiki Ramayana, Sundara Kanda, Sarga 15]` accurate? |
+| **Citation precision** | 15% | Are inline citations accurate and traceable to sources? |
 
 **Overall score** = weighted sum. A response passes when score ≥ 0.65.
 
@@ -179,7 +179,7 @@ The judge makes two LLM calls per response:
 - **Primary** (`sarvamai/sarvam-m`): answer relevance + context utilization
 - **Secondary** (`sarvamai/sarvam-30b`): faithfulness + citation precision
 
-Both judges are Sarvam models running via an OpenAI-compatible local API — no cloud calls for evaluation. For local development without a Sarvam server, both roles can be overridden with an Ollama model:
+Both judges are Sarvam models running via a local OpenAI-compatible API — no cloud calls for evaluation. For local development without a Sarvam server, both roles can be overridden with an Ollama model:
 
 ```python
 from core.llm import LLMBackend, LLMConfig
@@ -209,23 +209,10 @@ This is a small but intentional design choice: the retrieval schema must remain 
 All tests run without cloud API keys.
 
 **Unit tests** (`tests/unit/`, 29 tests, < 5 seconds):
-- Scorer math (weighted average, pass threshold)
-- Mode compliance regex for all four query modes (guidance, story, children, scholar)
-- Retrieval stats (mean, min, section diversity)
-- MetricScore labels (good / fair / poor thresholds)
-- Passage formatting for judge prompts
-- `ValidationResult.to_dict()` output shape
+- Scorer math, mode compliance regex, retrieval stats, MetricScore labels, passage formatting
 
 **Integration tests** (`tests/integration/`):
-
-The integration suite uses a seed corpus file (`knowledge/processed/seed_corpus.jsonl`) and a local Ollama model. No Pinecone, no OpenAI, no Anthropic — completely offline after `ollama pull qwen2.5:1.5b`.
-
-The `local_pipeline.py` module provides:
-- **Local retrieval**: keyword overlap scoring against the seed corpus (replaces Pinecone embed + query)
-- **Local LLM**: Ollama `qwen2.5:1.5b` for answer generation (replaces Claude)
-- **Mode compliance fallback**: if the local model's answer does not satisfy the format check, a deterministic template is composed from the top retrieved passage
-
-Tests are auto-skipped if Ollama is unavailable — they never fail on missing services.
+Uses a local seed corpus and Ollama `qwen2.5:1.5b`. No Pinecone, no OpenAI, no Anthropic.
 
 ```bash
 make test-unit          # < 5s, zero credentials
@@ -251,46 +238,21 @@ Run order for text corpus:
 normalize_raw_corpus → translate_corpus → ingest_to_pinecone
 ```
 
-For audio (requires API server running):
-```
-transcribe_audio_batch → (translate_corpus already handles new transcripts) → ingest_to_pinecone
-```
-
----
-
-## Batch Processing Across Full Audio Collections
-
-Single-file scripts are useful for debugging. Corpus building needs orchestration. `transcribe_audio_batch.py` now:
-
-1. Discovers supported audio files in a directory (mp3, wav, m4a, flac, opus, wma)
-2. Splits each to 29-second clips via ffmpeg
-3. Uploads each clip to the running transcription API with retry on transient errors
-4. Skips clips that already have a transcript (unless `--overwrite`)
-5. Emits a JSON batch manifest for run tracking
-
-This makes long-running corpus builds resumable.
-
 ---
 
 ## Reliability Problems Solved
 
-**Optional dependency coupling**
-Local Ollama translation runs were failing because heavy IndicTrans2 dependencies were imported eagerly. Fixed by moving all IndicTrans2 imports inside the function that uses them — the module loads only when that backend is selected.
+**Optional dependency coupling** — Heavy IndicTrans2 imports moved to lazy-load inside the function that uses them. Module load is now fast regardless of what is installed.
 
-**Windows encoding failures**
-Batch subprocess output failed with charmap errors on non-ASCII Telugu output. Fixed by configuring UTF-8-safe process I/O and explicit encoding on all file writes.
+**Windows encoding failures** — UTF-8-safe process I/O and explicit `encoding="utf-8"` on all file writes.
 
-**Path and environment fragility**
-Relative path assumptions made runs sensitive to launch directory. Fixed by standardising to repo-root path resolution (`Path(__file__).resolve().parents[N]`) in every script.
+**Path and environment fragility** — Standardised to repo-root path resolution in every script.
 
-**Silent translation failures**
-71 records had silently empty translations after a batch run. The `translation_fallback_reason` field — populated on every record including failures — made it straightforward to find and recover them in a single targeted re-run.
+**Silent translation failures** — The `translation_fallback_reason` field on every record (including failures) made 71 missing translations immediately identifiable and recoverable.
 
 ---
 
 ## Output Schema Snapshot
-
-Each JSONL record includes:
 
 ```json
 {
@@ -313,24 +275,11 @@ Each JSONL record includes:
 }
 ```
 
-This schema supports retrieval today, manual review via the API, and fine-tuning dataset export later.
-
----
-
-## Why This Matters for Dharmic AI
-
-For dharmic and ethical AI, grounding is not optional. This pipeline provides:
-
-1. **Source-aware retrieval** — every answer can be traced to a specific corpus record with a citation
-2. **Human correction loops** — manual translations sit alongside model output without overwriting it
-3. **Structured quality improvement** — the validation pipeline gives a numeric score to "how grounded is this answer"
-4. **Training data pathways** — model-vs-human translation pairs and judge-scored QA pairs are future fine-tuning material
-
 ---
 
 ## For Potential Collaborators
 
-If you are evaluating DharmaGPT as a collaborator, the current prototype already has:
+The current prototype already has:
 
 1. Corpus creation pipeline from long audio
 2. Local-first translation with three-backend fallback
@@ -344,7 +293,7 @@ What is still open and valuable to build together:
 1. Larger corpus expansion across languages and source types
 2. Product UX for review, guidance, and companion use cases
 3. Governance framework for trusted source curation
-4. Confidence-guided review prioritization (score low-confidence records first for human review)
+4. Confidence-guided review prioritization
 
 ---
 

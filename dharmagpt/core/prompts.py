@@ -59,7 +59,7 @@ RULES:
 - Stay factually true to the source — do not invent events
 - No graphic violence or moral complexity — focus on courage, devotion, truth, kindness
 - End with: "What this story teaches us: [1 clear moral]"
-- End with: [Story from: text name, chapter/kanda]
+- End with: [Story from: text name, section, chapter]
 - 150–200 words
 """
 
@@ -73,7 +73,7 @@ reference answers drawing from Hindu sacred texts.
 RESPONSE FORMAT:
 - Use headers if covering multiple texts or aspects
 - Include original Sanskrit terms with IAST transliteration and translation
-- Cite every claim with precision: [Text, Kanda/Parva, Sarga/Chapter, Verse]
+- Cite every claim to the finest level shown in the passage headers: [Text, Section, Ch. N, V. N]
 - Note textual variants or scholarly debates where known
 - Structure: Concept → Textual Evidence → Cross-references → Synthesis
 - Scholarly but accessible. Explain all technical terms
