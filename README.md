@@ -14,7 +14,7 @@
 
 DharmaGPT is an open-source AI backend that powers natural-language access to the wisdom of Hindu sacred texts. Ask life questions, generate factual story retellings, find verse references, and process Sanskrit chantings — all grounded in real source texts with citations.
 
-**This is not a chatbot that makes things up.** Every answer is retrieved from indexed source texts (Valmiki Ramayana, Mahabharata, Bhagavad Gita, Upanishads, Puranas) and cited by kanda, parva, chapter, and verse.
+**This is not a chatbot that makes things up.** Every answer is retrieved from indexed source texts and cited to the finest provenance available — section (Kanda / Parva / Adhyaya / Skandha), chapter, and verse. The citation schema is text-agnostic: the same pipeline handles the Ramayana, Mahabharata, Upanishads, and Puranas without hardcoding any text's terminology.
 
 ---
 
@@ -81,9 +81,9 @@ data/                     # Local data (gitignored)
 
 | Script | What it does |
 |---|---|
-| `normalize_raw_corpus.py` | Cleans scraped raw JSONL → flat corpus schema |
+| `normalize_raw_corpus.py` | Cleans scraped raw JSONL → flat corpus schema. Builds full citation strings: `"Valmiki Ramayana, Sundara Kanda, Sarga 15, Verse 22"`. Outputs `section`, `chapter`, `verse` fields. |
 | `translate_corpus.py` | Batch-translates corpus records to English (Anthropic → Ollama → IndicTrans2) |
-| `ingest_to_pinecone.py` | Embeds corpus records and upserts vectors to Pinecone |
+| `ingest_to_pinecone.py` | Embeds corpus records and upserts vectors to Pinecone. Stores `section`, `chapter`, `verse` metadata alongside legacy `kanda`/`sarga` keys for backward compatibility. |
 | `transcribe_audio_batch.py` | Splits source audio into 29s clips and uploads each to the running API for transcription |
 | `run_evaluation.py` | Evaluates RAG response quality across faithfulness, relevance, citation precision, and context use |
 
@@ -180,6 +180,21 @@ The compose stack runs:
 - `nginx` on port `80` for public access
 
 Place your editable JSONL files under `dharmagpt/knowledge/processed/` and mount that directory so translations persist across restarts. If your team should only access the tool internally, put the server behind VPN, a private subnet, or an identity-aware proxy.
+
+### Query the API
+
+```bash
+# POST /api/v1/query
+{
+  "query": "How should I deal with anger?",
+  "mode": "guidance",           # guidance | story | children | scholar
+  "language": "en",             # answer language (routing in progress)
+  "filter_section": "Sundara Kanda",  # optional: scope retrieval to one section
+  "history": []                 # optional: last N conversation turns
+}
+```
+
+Response includes `sources[]` — each with `citation`, `section`, `chapter`, `verse`, and `score`.
 
 ### Ingest Data
 
