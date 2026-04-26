@@ -26,6 +26,32 @@ def get_openai() -> AsyncOpenAI:
     return _openai
 
 
+def _source_text_from_metadata(meta: dict) -> str:
+    """
+    Choose the richest text available for retrieval context.
+
+    Prefer the full stored chunk text, then any translated text, and only fall
+    back to the preview when necessary.
+    """
+    base_text = (meta.get("text") or "").strip()
+    translated_text = (meta.get("translated_text") or meta.get("text_en") or meta.get("text_en_model") or "").strip()
+    preview = (meta.get("text_preview") or "").strip()
+    language = (meta.get("language") or "").strip().lower()
+
+    if base_text and translated_text and translated_text != base_text:
+        if language and language != "en":
+            return f"{base_text}\n\nEnglish translation:\n{translated_text}"
+        if meta.get("source_type") == "audio":
+            return f"{base_text}\n\nEnglish translation:\n{translated_text}"
+        return base_text
+
+    if base_text:
+        return base_text
+    if translated_text:
+        return translated_text
+    return preview
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
 async def embed_query(text: str) -> list[float]:
     client = get_openai()
@@ -72,7 +98,7 @@ async def retrieve(
             continue
         meta = match.metadata or {}
         chunks.append(SourceChunk(
-            text=meta.get("text_preview", ""),
+            text=_source_text_from_metadata(meta),
             citation=meta.get("citation", "Valmiki Ramayana"),
             kanda=meta.get("kanda"),
             sarga=int(meta["sarga"]) if meta.get("sarga") else None,

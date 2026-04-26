@@ -246,6 +246,7 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
             record_metadata = {
                 "source_type": "audio",
                 "source_file": filename,
+                "text": chunk["text"],
                 "text_preview": chunk["text"][:300],
                 "start_time_sec": chunk.get("start") or "",
                 "end_time_sec": chunk.get("end") or "",
@@ -265,6 +266,7 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
                 "translation_attempted_backends": provenance["translation_attempted_backends"] or [],
             }
             if translated.strip():
+                record_metadata["translated_text"] = translated.strip()
                 record_metadata["translated_text_preview"] = translated[:300]
             if outcome is not None:
                 record_metadata["translation_chunk_backend"] = outcome.backend

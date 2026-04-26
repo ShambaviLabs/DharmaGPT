@@ -6,6 +6,7 @@
 [![Made in India](https://img.shields.io/badge/Made%20in-India-orange)](https://github.com/dharmagpt)
 [![Powered by Sarvam AI](https://img.shields.io/badge/Audio-Sarvam%20AI-blue)](https://sarvam.ai)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![CI](https://github.com/sahitya-pavurala/DharmaGPT/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sahitya-pavurala/DharmaGPT/actions/workflows/ci.yml)
 
 ---
 
@@ -191,6 +192,33 @@ python scripts/ingest_to_pinecone.py
 # Process audio (requires API server running)
 python scripts/transcribe_audio_batch.py --input-dir data/audio/ --language-code te-IN
 ```
+
+### Run Tests
+
+Two separate build steps — unit tests are always fast and offline; integration tests exercise the full pipeline end-to-end.
+
+```bash
+# Unit tests — no API keys required, runs in < 5s
+make test-unit
+# or directly:
+cd dharmagpt && PYTHONPATH=. python -m pytest tests/unit/ -v
+
+# Integration tests — requires .env with ANTHROPIC_API_KEY, OPENAI_API_KEY, PINECONE_API_KEY
+# Tests the full path: query → embed → retrieve → generate → score
+make test-integration
+# or directly:
+cd dharmagpt && PYTHONPATH=. python -m pytest tests/integration/ -v --timeout=120
+
+# Both steps together
+make test-all
+```
+
+Integration tests are automatically **skipped** (not failed) when credentials are absent, so they're safe to include in CI without a secrets gate.
+
+| Suite | Location | Speed | Needs credentials |
+|---|---|---|---|
+| Unit | `tests/unit/` | < 5s | No |
+| Integration | `tests/integration/` | 30–120s | Yes |
 
 ### Evaluate Response Quality
 

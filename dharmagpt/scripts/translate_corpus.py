@@ -112,7 +112,10 @@ def _translate_record(record: dict, *, config: TranslationConfig, force: bool) -
         record["translation_attempted_backends"] = []
         return record, False
 
+    # Keep both field names for compatibility with ingestion, manual review,
+    # and existing processed corpora.
     record["text_en_model"] = outcome.text
+    record["text_en"] = outcome.text
     record["translation_mode"] = outcome.requested_mode
     record["translation_backend"] = outcome.backend
     record["translation_version"] = outcome.version

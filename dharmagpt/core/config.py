@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:8081"
 
     # Anthropic
-    anthropic_api_key: str
+    anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-20250514"
 
     # Generic LLM routing
@@ -35,17 +35,17 @@ class Settings(BaseSettings):
     evaluation_secondary_timeout_sec: int = 120
 
     # OpenAI (embeddings)
-    openai_api_key: str
+    openai_api_key: str = ""
     embedding_model: str = "text-embedding-3-large"
     embedding_dims: int = 3072
 
     # Pinecone
-    pinecone_api_key: str
+    pinecone_api_key: str = ""
     pinecone_index_name: str = "dharma-gpt"
     pinecone_environment: str = "us-east-1"
 
     # Sarvam AI
-    sarvam_api_key: str
+    sarvam_api_key: str = ""
     indictrans2_model: str = "ai4bharat/indictrans2-indic-en-dist-200M"
 
     # Manual translation review API

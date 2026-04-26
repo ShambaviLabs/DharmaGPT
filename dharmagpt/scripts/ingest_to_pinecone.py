@@ -140,6 +140,8 @@ def batch_embed(texts: list[str], client: OpenAI) -> list[list[float]]:
 def build_metadata(record: dict, dataset_id: str) -> dict:
     """Extract Pinecone-storable metadata from a corpus record."""
     # Pinecone metadata values must be str, int, float, bool, or list[str]
+    text = record.get("text", "")
+    text_en = record.get("text_en") or record.get("text_en_model") or ""
     meta: dict = {
         "source": record.get("source", ""),
         "source_type": record.get("source_type", "text"),
@@ -149,10 +151,13 @@ def build_metadata(record: dict, dataset_id: str) -> dict:
         "tags": record.get("tags", []),
         "characters": record.get("characters", []),
         "topics": record.get("topics", []),
-        "text_preview": record.get("text", "")[:500],
+        "text": text,
+        "text_preview": text[:500],
+        "text_en": text_en,
+        "text_en_preview": text_en[:500],
         "url": record.get("url", ""),
         "has_telugu": bool(record.get("text_te", "").strip()),
-        "has_english": bool(record.get("text_en", "").strip()),
+        "has_english": bool(text_en.strip()),
         "dataset_id": dataset_id,
     }
     if record.get("kanda"):
@@ -173,8 +178,9 @@ def build_embed_text(record: dict) -> str:
     parts = [record["text"]]
     if record.get("text_te"):
         parts.append(record["text_te"])
-    if record.get("text_en") and record.get("language") != "en":
-        parts.append(record["text_en"])
+    text_en = record.get("text_en") or record.get("text_en_model")
+    if text_en and record.get("language") != "en":
+        parts.append(text_en)
     # Append citation for semantic grounding
     parts.append(record.get("citation", ""))
     return " | ".join(p for p in parts if p.strip())
