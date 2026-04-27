@@ -56,6 +56,29 @@ def embed_texts_local(texts: list[str], dims: int | None = None) -> list[list[fl
     return [embed_text_local(text, dims=dims) for text in texts]
 
 
+def use_local_hash_embeddings() -> bool:
+    return settings.embedding_backend.lower() == "local_hash"
+
+
+async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str]:
+    if use_local_hash_embeddings():
+        return embed_texts_local(texts), "local_hash"
+
+    try:
+        client = get_openai()
+        response = await client.embeddings.create(
+            model=settings.embedding_model,
+            input=texts,
+        )
+        return [row.embedding for row in response.data], "openai"
+    except Exception as exc:
+        if settings.vector_db_backend.lower() == "local":
+            log.warning("embedding_fallback_local", error=str(exc))
+            return embed_texts_local(texts), "local_hash"
+        log.warning("embedding_failed", error=str(exc))
+        raise
+
+
 def _source_text_from_metadata(meta: dict) -> str:
     """
     Choose the richest text available for retrieval context.
@@ -84,6 +107,9 @@ def _source_text_from_metadata(meta: dict) -> str:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
 async def embed_query(text: str) -> list[float]:
+    if settings.vector_db_backend.lower() == "local" or use_local_hash_embeddings():
+        return embed_text_local(text)
+
     try:
         client = get_openai()
         response = await client.embeddings.create(
@@ -92,9 +118,7 @@ async def embed_query(text: str) -> list[float]:
         )
         return response.data[0].embedding
     except Exception as exc:
-        if settings.vector_db_backend.lower() == "local":
-            log.warning("embedding_fallback_local", error=str(exc))
-            return embed_text_local(text)
+        log.warning("embedding_failed", error=str(exc))
         raise
 
 
@@ -117,7 +141,8 @@ async def retrieve(
     vector = await embed_query(query)
 
     matches: list[dict]
-    if settings.vector_db_backend.lower() == "local":
+    backend = settings.vector_db_backend.lower()
+    if backend == "local":
         matches = query_vectors(
             vector=vector,
             top_k=top_k,
@@ -181,7 +206,7 @@ async def retrieve(
             url=meta.get("url"),
         ))
 
-    log.info("retrieval_done", backend="pinecone", query=query[:60], results=len(chunks))
+    log.info("retrieval_done", backend=backend, query=query[:60], results=len(chunks))
     return chunks
 
 

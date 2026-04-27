@@ -2,13 +2,16 @@ import asyncio
 import json
 import os
 import subprocess
+import re
 import tempfile
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
-from api.auth import require_staging_api_key
+from api.auth import require_admin_api_key
 from models.schemas import AudioTranscribeResponse
 from core import dataset_store
 from core.config import get_settings
@@ -55,6 +58,8 @@ def _split_audio_to_segments(source_path: str) -> tuple[list[str], str]:
     return [str(s) for s in segs], tmp_dir
 PROCESSED_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "processed"
 TRANSCRIPT_DIR = PROCESSED_DIR / "audio_transcript"
+RAW_AUDIO_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "uploads" / "audio_sources"
+AUDIT_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "audit"
 
 _MIME_MAP = {
     ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
@@ -63,6 +68,25 @@ _MIME_MAP = {
 _LANG_SHORT = {
     "te-in": "te", "hi-in": "hi", "sa-in": "sa", "en-in": "en", "en-us": "en",
 }
+
+
+def _safe_filename(filename: str) -> str:
+    name = Path(filename or "audio").name
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "audio"
+
+
+def _save_audio_source(filename: str, audio_bytes: bytes) -> tuple[str, str]:
+    RAW_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = RAW_AUDIO_DIR / f"{ts}_{_safe_filename(filename)}"
+    path.write_bytes(audio_bytes)
+    return str(path), sha256(audio_bytes).hexdigest()
+
+
+def _append_audio_audit(record: dict) -> None:
+    AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+    with (AUDIT_DIR / "audio_uploads.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 # ── STT backends ──────────────────────────────────────────────────────────────
@@ -281,7 +305,9 @@ async def transcribe_audio(
     section: str = Form(None),
     description: str = Form(None),
     dataset_name: str = Form(""),
-    _: None = Depends(require_staging_api_key),
+    source_title: str = Form(None),
+    source: str = Form(None),
+    _: None = Depends(require_admin_api_key),
 ) -> AudioTranscribeResponse:
     """
     Upload a Sanskrit/Hindi audio file (chanting, pravachanam, discourse).
@@ -294,6 +320,7 @@ async def transcribe_audio(
     audio_bytes = await file.read()
     if len(audio_bytes) > 100 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large. Max 100MB.")
+    source_file_path, content_sha256 = _save_audio_source(file.filename or "audio", audio_bytes)
 
     log.info("audio_transcribe_start", file=file.filename, lang=language_code, size_mb=round(len(audio_bytes)/1e6, 2), stt_backend=settings.stt_backend)
 
@@ -318,10 +345,14 @@ async def transcribe_audio(
         "language_code": language_code,
         "section": section,
         "description": description or file.filename,
+        "source_title": source_title or description or file.filename,
+        "source": source or source_stem_from_audio_filename(file.filename, language=normalize_language_tag(language_code)),
         "transcription_mode": transcription_mode,
         "transcription_version": transcription_version,
         "text_source": "Valmiki Ramayana",
         "source_file": file.filename,
+        "source_file_path": source_file_path,
+        "content_sha256": content_sha256,
     }
     chunk_result = await chunk_and_index(transcript_data, file.filename, file_metadata, dataset_id=ds_id)
     if ds_id:
@@ -353,6 +384,8 @@ async def transcribe_audio(
         "url": "",
         "notes": f"Transcribed from {file.filename}",
         "source_file": file.filename,
+        "source_file_path": source_file_path,
+        "content_sha256": content_sha256,
         "description": description or file.filename,
         "transcription_mode": transcription_mode,
         "transcription_version": transcription_version,
@@ -362,6 +395,9 @@ async def transcribe_audio(
         "translation_fallback_reason": chunk_result.get("translation_fallback_reason"),
         "translation_attempted_backends": chunk_result.get("translation_attempted_backends") or [],
         "chunks_created": chunk_result["chunks_created"],
+        "vector_db": chunk_result.get("vector_db"),
+        "vectors_upserted": chunk_result.get("vectors_upserted"),
+        "embedding_backend": chunk_result.get("embedding_backend"),
     }
 
     try:
@@ -376,10 +412,29 @@ async def transcribe_audio(
         "audio_transcribe_done",
         file=file.filename,
         chunks=chunk_result["chunks_created"],
+        vector_db=chunk_result.get("vector_db"),
+        vectors=chunk_result.get("vectors_upserted"),
         translation_backend=chunk_result.get("translation_backend"),
         translation_version=chunk_result.get("translation_version"),
         transcript_file=transcript_file_name,
     )
+    _append_audio_audit({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "role": "audio_transcript_indexed",
+        "file_path": source_file_path,
+        "original_filename": file.filename,
+        "bytes": len(audio_bytes),
+        "sha256": content_sha256,
+        "source": file_metadata["source"],
+        "source_title": file_metadata["source_title"],
+        "language_code": language_code,
+        "section": section,
+        "transcript_file": str(transcript_path),
+        "chunks_created": chunk_result["chunks_created"],
+        "vectors_upserted": chunk_result.get("vectors_upserted"),
+        "vector_db": chunk_result.get("vector_db"),
+        "embedding_backend": chunk_result.get("embedding_backend"),
+    })
 
     return AudioTranscribeResponse(
         transcript=transcript_text,

@@ -42,7 +42,9 @@ async def test_retrieve_returns_filtered_results():
     from core import retrieval
 
     original_backend = retrieval.settings.vector_db_backend
+    original_min_score = retrieval.settings.rag_min_score
     retrieval.settings.vector_db_backend = "pinecone"
+    retrieval.settings.rag_min_score = 0.35
     try:
         with patch("core.retrieval.embed_query", new=AsyncMock(return_value=[0.1] * 3072)), \
              patch("core.retrieval.get_pinecone") as mock_pc:
@@ -50,6 +52,7 @@ async def test_retrieve_returns_filtered_results():
             results = await retrieve("Where did Hanuman find Sita?")
     finally:
         retrieval.settings.vector_db_backend = original_backend
+        retrieval.settings.rag_min_score = original_min_score
 
     assert len(results) == 1
     assert results[0].score == 0.9

@@ -11,10 +11,10 @@ import re
 import uuid
 
 import structlog
-from openai import AsyncOpenAI
-from pinecone import Pinecone
 
 from core.config import get_settings
+from core.local_vector_store import upsert_vectors
+from core.retrieval import embed_texts, get_pinecone
 from core.translation import TranslationBackend, TranslationConfig, TranslationOutcome, translate_text
 
 log = structlog.get_logger()
@@ -196,7 +196,7 @@ def _summarize_provenance(outcomes: list[TranslationOutcome | None]) -> dict[str
 
 
 async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: dict, dataset_id: str = "") -> dict:
-    """Main entry: chunk transcript -> translate if needed -> embed -> upsert to Pinecone."""
+    """Main entry: chunk transcript -> translate if needed -> embed -> upsert to configured vector DB."""
     words = transcript_data.get("words", [])
     raw_text = transcript_data.get("transcript", "")
 
@@ -228,84 +228,86 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
     stem = filename.rsplit(".", 1)[0]
     records = []
 
-    try:
-        # Embed all chunks in one batch. Include translation for richer retrieval.
-        openai = AsyncOpenAI(api_key=settings.openai_api_key)
-        texts = []
-        for chunk, translated in zip(raw_chunks, translated_chunks):
-            if translated.strip():
-                texts.append(f"{chunk['text']} | {translated.strip()}")
-            else:
-                texts.append(chunk["text"])
-        embed_response = await openai.embeddings.create(model=settings.embedding_model, input=texts)
-        vectors = [r.embedding for r in embed_response.data]
-
-        for i, (chunk, vec, translated, outcome) in enumerate(zip(raw_chunks, vectors, translated_chunks, outcomes)):
-            record_metadata = {
-                "source_type": "audio",
-                "source_file": filename,
-                "text": chunk["text"],
-                "text_preview": chunk["text"][:300],
-                "start_time_sec": chunk.get("start") or "",
-                "end_time_sec": chunk.get("end") or "",
-                "speaker_type": chunk["speaker"],
-                "has_shloka": chunk["has_shloka"],
-                "section": file_metadata.get("section") or "",
-                "language": file_metadata.get("language_code", "hi-IN"),
-                "description": file_metadata.get("description", stem),
-                "citation": f"Audio: {file_metadata.get('description', stem)}",
-                "word_count": len(chunk["text"].split()),
-                "transcription_mode": file_metadata.get("transcription_mode", "sarvam_stt"),
-                "transcription_version": file_metadata.get("transcription_version", "saaras:v3"),
-                "translation_mode": provenance["translation_mode"] or "",
-                "translation_backend": provenance["translation_backend"] or "",
-                "translation_version": provenance["translation_version"] or "",
-                "translation_fallback_reason": provenance["translation_fallback_reason"] or "",
-                "translation_attempted_backends": provenance["translation_attempted_backends"] or [],
-            }
-            if dataset_id:
-                record_metadata["dataset_id"] = dataset_id
-            if translated.strip():
-                record_metadata["translated_text"] = translated.strip()
-                record_metadata["translated_text_preview"] = translated[:300]
-            if outcome is not None:
-                record_metadata["translation_chunk_backend"] = outcome.backend
-                record_metadata["translation_chunk_version"] = outcome.version
-            records.append(
-                {
-                    "id": f"audio_{stem}_{uuid.uuid4().hex[:8]}_{i:04d}",
-                    "values": vec,
-                    "metadata": record_metadata,
-                }
-            )
-
-        # Route to local SQLite or Pinecone based on VECTOR_DB_BACKEND
-        backend = settings.vector_db_backend.lower()
-        batch_size = 100
-        if backend == "local":
-            from core.local_vector_store import upsert_vectors
-            import asyncio
-            for i in range(0, len(records), batch_size):
-                await asyncio.to_thread(
-                    upsert_vectors,
-                    index_name=settings.local_vector_index_name,
-                    namespace=settings.local_vector_namespace,
-                    records=records[i : i + batch_size],
-                )
+    texts = []
+    for chunk, translated in zip(raw_chunks, translated_chunks):
+        if translated.strip():
+            texts.append(f"{chunk['text']} | {translated.strip()}")
         else:
-            pc = Pinecone(api_key=settings.pinecone_api_key)
-            index = pc.Index(settings.pinecone_index_name)
-            for i in range(0, len(records), batch_size):
-                index.upsert(vectors=records[i : i + batch_size])
+            texts.append(chunk["text"])
+
+    try:
+        vectors, embedding_backend = await embed_texts(texts)
     except Exception as exc:
         log.warning("audio_indexing_skipped", file=filename, reason=str(exc))
-        records = []
+        vectors = []
+        embedding_backend = None
+
+    for i, (chunk, vec, translated, outcome) in enumerate(zip(raw_chunks, vectors, translated_chunks, outcomes)):
+        record_metadata = {
+            "source_type": "audio",
+            "source_file": filename,
+            "source": file_metadata.get("source") or stem,
+            "source_title": file_metadata.get("source_title") or file_metadata.get("description", stem),
+            "text": chunk["text"],
+            "text_preview": chunk["text"][:300],
+            "start_time_sec": chunk.get("start") or "",
+            "end_time_sec": chunk.get("end") or "",
+            "speaker_type": chunk["speaker"],
+            "has_shloka": chunk["has_shloka"],
+            "section": file_metadata.get("section") or "",
+            "language": file_metadata.get("language_code", "hi-IN"),
+            "description": file_metadata.get("description", stem),
+            "citation": f"Audio: {file_metadata.get('description', stem)}",
+            "word_count": len(chunk["text"].split()),
+            "transcription_mode": file_metadata.get("transcription_mode", "sarvam_stt"),
+            "transcription_version": file_metadata.get("transcription_version", "saaras:v3"),
+            "translation_mode": provenance["translation_mode"] or "",
+            "translation_backend": provenance["translation_backend"] or "",
+            "translation_version": provenance["translation_version"] or "",
+            "translation_fallback_reason": provenance["translation_fallback_reason"] or "",
+            "translation_attempted_backends": provenance["translation_attempted_backends"] or [],
+            "embedding_backend": embedding_backend or "",
+        }
+        if dataset_id:
+            record_metadata["dataset_id"] = dataset_id
+        if translated.strip():
+            record_metadata["translated_text"] = translated.strip()
+            record_metadata["translated_text_preview"] = translated[:300]
+        if outcome is not None:
+            record_metadata["translation_chunk_backend"] = outcome.backend
+            record_metadata["translation_chunk_version"] = outcome.version
+        records.append(
+            {
+                "id": f"audio_{stem}_{uuid.uuid4().hex[:8]}_{i:04d}",
+                "values": vec,
+                "metadata": record_metadata,
+            }
+        )
+
+    vector_db = settings.vector_db_backend.lower()
+    upserted = 0
+    if records:
+        batch_size = 100
+        if vector_db == "local":
+            upserted = upsert_vectors(
+                index_name=settings.local_vector_index_name,
+                namespace=settings.local_vector_namespace,
+                records=records,
+            )
+        else:
+            index = get_pinecone().Index(settings.pinecone_index_name)
+            for i in range(0, len(records), batch_size):
+                batch = records[i : i + batch_size]
+                index.upsert(vectors=batch)
+                upserted += len(batch)
 
     translated_transcript = "\n".join(piece for piece in translated_chunks if piece.strip()) if needs_translation else None
     log.info(
         "audio_indexed",
         file=filename,
         chunks=len(raw_chunks),
+        vector_db=vector_db,
+        vectors=upserted,
         translation_backend=provenance["translation_backend"],
         translation_version=provenance["translation_version"],
     )
@@ -317,4 +319,7 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
         "translation_version": provenance["translation_version"],
         "translation_fallback_reason": provenance["translation_fallback_reason"],
         "translation_attempted_backends": provenance["translation_attempted_backends"],
+        "vector_db": vector_db,
+        "vectors_upserted": upserted,
+        "embedding_backend": embedding_backend,
     }

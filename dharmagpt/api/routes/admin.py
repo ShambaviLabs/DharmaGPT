@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime, timezone
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
@@ -12,64 +16,59 @@ from core import dataset_store
 from api.auth import require_admin_api_key
 from core.config import get_settings
 from core.local_vector_store import upsert_vectors
-from core.retrieval import embed_texts_local, get_openai, get_pinecone
+from core.retrieval import embed_texts, get_pinecone
 
 router = APIRouter()
 settings = get_settings()
+KNOWLEDGE_DIR = Path(__file__).resolve().parents[2] / "knowledge"
+SOURCE_FILE_DIR = KNOWLEDGE_DIR / "uploads" / "source_files"
+AUDIT_DIR = KNOWLEDGE_DIR / "audit"
+
+
+def _safe_filename(filename: str) -> str:
+  name = Path(filename or "upload.txt").name
+  return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "upload.txt"
 
 
 def _normalize_text(raw: str) -> str:
   return re.sub(r"\s+", " ", raw).strip()
 
 
-def _chunk_text(raw: str, max_chars: int = 1200) -> list[str]:
+def _chunk_text(raw: str, chunk_words: int = 650, overlap_words: int = 80) -> list[str]:
   text = _normalize_text(raw)
   if not text:
     return []
 
-  # Split first on paragraph breaks, then fold into bounded chunks.
-  paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
-  if not paragraphs:
-    paragraphs = [text]
+  words = text.split()
+  if len(words) <= chunk_words:
+    return [text] if len(words) >= 20 else []
 
+  step = max(1, chunk_words - overlap_words)
   chunks: list[str] = []
-  buf = ""
-  for para in paragraphs:
-    para = _normalize_text(para)
-    if not para:
-      continue
-
-    if len(para) > max_chars:
-      sentences = re.split(r"(?<=[.!?])\s+", para)
-      for sentence in sentences:
-        sentence = _normalize_text(sentence)
-        if not sentence:
-          continue
-        if not buf:
-          buf = sentence
-        elif len(buf) + 1 + len(sentence) <= max_chars:
-          buf += " " + sentence
-        else:
-          chunks.append(buf)
-          buf = sentence
-      continue
-
-    if not buf:
-      buf = para
-    elif len(buf) + 1 + len(para) <= max_chars:
-      buf += " " + para
-    else:
-      chunks.append(buf)
-      buf = para
-
-  if buf:
-    chunks.append(buf)
-
+  for start in range(0, len(words), step):
+    chunk = " ".join(words[start : start + chunk_words]).strip()
+    if len(chunk.split()) >= 20:
+      chunks.append(chunk)
+    if start + chunk_words >= len(words):
+      break
   return chunks
+
+
+def _extract_pdf(raw: bytes) -> str:
+  try:
+    from pypdf import PdfReader
+  except ImportError as exc:
+    raise HTTPException(status_code=500, detail="PDF upload requires pypdf to be installed") from exc
+  reader = PdfReader(BytesIO(raw))
+  return "\n\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 def _extract_text(filename: str, raw: bytes) -> str:
   suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else "txt"
+
+  if suffix == "pdf":
+    return _extract_pdf(raw)
+
   decoded = raw.decode("utf-8", errors="ignore")
 
   if suffix in {"txt", "md", "rst", "csv", "tsv"}:
@@ -114,6 +113,22 @@ def _extract_text(filename: str, raw: bytes) -> str:
   return decoded
 
 
+def _save_source_file(filename: str, raw: bytes) -> tuple[str, str]:
+  SOURCE_FILE_DIR.mkdir(parents=True, exist_ok=True)
+  ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+  safe_name = _safe_filename(filename)
+  path = SOURCE_FILE_DIR / f"{ts}_{safe_name}"
+  path.write_bytes(raw)
+  return str(path), sha256(raw).hexdigest()
+
+
+def _append_upload_audit(record: dict) -> None:
+  AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+  audit_path = AUDIT_DIR / "corpus_uploads.jsonl"
+  with audit_path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 @router.post("/admin/vector/upload")
 async def upload_document_to_vector_db(
   file: UploadFile = File(...),
@@ -121,6 +136,14 @@ async def upload_document_to_vector_db(
   index_name: str = Form(""),
   namespace: str = Form(""),
   dataset_name: str = Form(""),
+  source_title: str = Form(""),
+  source: str = Form(""),
+  language: str = Form("en"),
+  source_type: str = Form("text"),
+  section: str = Form(""),
+  author: str = Form(""),
+  translator: str = Form(""),
+  url: str = Form(""),
   _: None = Depends(require_admin_api_key),
 ) -> dict:
   vector_db = (vector_db or "local").strip().lower()
@@ -132,6 +155,7 @@ async def upload_document_to_vector_db(
   if not raw:
     raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+  source_file_path, content_sha256 = _save_source_file(filename, raw)
   text = _extract_text(filename, raw)
   chunks = _chunk_text(text)
   if not chunks:
@@ -155,25 +179,34 @@ async def upload_document_to_vector_db(
     dataset_store.register(ds_id)
 
   try:
-    client = get_openai()
-    embed_response = await client.embeddings.create(model=settings.embedding_model, input=chunks)
-    vectors = [row.embedding for row in embed_response.data]
-    embedding_backend = "openai"
+    vectors, embedding_backend = await embed_texts(chunks)
   except Exception as exc:
-    if vector_db != "local":
-      raise HTTPException(status_code=502, detail="Cloud embedding provider unavailable") from exc
-    vectors = embed_texts_local(chunks)
-    embedding_backend = "local_hash"
+    raise HTTPException(status_code=502, detail="Embedding provider unavailable") from exc
 
   records = []
   doc_id = uuid.uuid4().hex[:12]
+  resolved_title = (source_title or Path(filename).stem).strip()
+  resolved_source = (source or re.sub(r"[^a-z0-9]+", "_", resolved_title.lower()).strip("_") or doc_id).strip()
+  now = datetime.now(timezone.utc).isoformat()
   for i, (chunk, vec) in enumerate(zip(chunks, vectors), start=1):
     meta = {
       "text": chunk,
-      "source_type": "admin_upload",
-      "citation": f"Admin upload: {filename}",
+      "source_type": (source_type or "text").strip(),
+      "citation": resolved_title,
+      "source": resolved_source,
+      "source_title": resolved_title,
       "document_name": filename,
+      "source_file": filename,
+      "source_file_path": source_file_path,
+      "content_sha256": content_sha256,
+      "language": (language or "en").strip(),
+      "section": (section or "").strip(),
+      "author": (author or "").strip(),
+      "translator": (translator or "").strip(),
+      "url": (url or "").strip(),
+      "upload_timestamp": now,
       "chunk_index": i,
+      "chunk_count": len(chunks),
     }
     if ds_id:
       meta["dataset_id"] = ds_id
@@ -201,6 +234,26 @@ async def upload_document_to_vector_db(
   if ds_id:
     dataset_store.increment_count(ds_id, upserted)
 
+  _append_upload_audit({
+    "timestamp": now,
+    "role": "indexed_source",
+    "file_path": source_file_path,
+    "original_filename": filename,
+    "bytes": len(raw),
+    "sha256": content_sha256,
+    "source": resolved_source,
+    "source_title": resolved_title,
+    "language": (language or "en").strip(),
+    "source_type": (source_type or "text").strip(),
+    "section": (section or "").strip(),
+    "vector_db": vector_db,
+    "index_name": target_index,
+    "namespace": target_namespace,
+    "chunks_created": len(chunks),
+    "vectors_upserted": upserted,
+    "embedding_backend": embedding_backend,
+  })
+
   return {
     "status": "ok",
     "vector_db": vector_db,
@@ -211,6 +264,10 @@ async def upload_document_to_vector_db(
     "chunks_created": len(chunks),
     "vectors_upserted": upserted,
     "embedding_backend": embedding_backend,
+    "source": resolved_source,
+    "source_title": resolved_title,
+    "source_file_path": source_file_path,
+    "content_sha256": content_sha256,
   }
 
 
@@ -348,6 +405,43 @@ def _feedback_page() -> str:
         <label for="namespace">Namespace</label>
         <input id="namespace" type="text" placeholder="optional" />
       </div>
+      <div class="field" style="min-width: 220px;">
+        <label for="sourceTitle">Source Title</label>
+        <input id="sourceTitle" type="text" placeholder="Valmiki Ramayana" />
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="sourceId">Source ID</label>
+        <input id="sourceId" type="text" placeholder="valmiki_ramayana" />
+      </div>
+      <div class="field" style="min-width: 160px;">
+        <label for="language">Language</label>
+        <input id="language" type="text" placeholder="en, sa, te, hi" />
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="sourceType">Source Type</label>
+        <select id="sourceType" style="border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); padding: 10px 14px;">
+          <option value="text" selected>Text</option>
+          <option value="commentary">Commentary</option>
+          <option value="translation">Translation</option>
+          <option value="audio_transcript">Audio Transcript</option>
+        </select>
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="section">Section</label>
+        <input id="section" type="text" placeholder="Bala Kanda" />
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="author">Author</label>
+        <input id="author" type="text" placeholder="Valmiki" />
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="translator">Translator</label>
+        <input id="translator" type="text" placeholder="optional" />
+      </div>
+      <div class="field" style="min-width: 220px;">
+        <label for="sourceUrl">Source URL</label>
+        <input id="sourceUrl" type="text" placeholder="optional" />
+      </div>
       <div class="field" style="min-width: 240px;">
         <label for="docFile">Document File</label>
         <input id="docFile" type="file" />
@@ -362,6 +456,30 @@ def _feedback_page() -> str:
     <div class="controls">
       <button class="btn-primary" id="loadBtn">Load</button>
       <div class="notice" id="notice"></div>
+    </div>
+
+    <div class="controls" style="align-items: center;">
+      <div class="field" style="min-width: 240px;">
+        <label for="audioFile">Audio File</label>
+        <input id="audioFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.opus" />
+      </div>
+      <div class="field" style="min-width: 160px;">
+        <label for="audioLang">Audio Language</label>
+        <input id="audioLang" type="text" placeholder="hi-IN, te-IN, sa-IN" />
+      </div>
+      <div class="field" style="min-width: 220px;">
+        <label for="audioTitle">Audio Title</label>
+        <input id="audioTitle" type="text" placeholder="Pravachanam title" />
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="audioSourceId">Audio Source ID</label>
+        <input id="audioSourceId" type="text" placeholder="pravachanam_series" />
+      </div>
+      <div class="field" style="min-width: 180px;">
+        <label for="audioSection">Audio Section</label>
+        <input id="audioSection" type="text" placeholder="optional" />
+      </div>
+      <button class="btn-primary" id="audioUploadBtn" style="margin-top: 18px;">Transcribe & Index</button>
     </div>
 
     <div class="stats">
@@ -544,6 +662,14 @@ def _feedback_page() -> str:
       fd.append("vector_db", document.getElementById("vectorDb").value || "local");
       fd.append("index_name", document.getElementById("indexName").value || "");
       fd.append("namespace", document.getElementById("namespace").value || "");
+      fd.append("source_title", document.getElementById("sourceTitle").value || "");
+      fd.append("source", document.getElementById("sourceId").value || "");
+      fd.append("language", document.getElementById("language").value || "en");
+      fd.append("source_type", document.getElementById("sourceType").value || "text");
+      fd.append("section", document.getElementById("section").value || "");
+      fd.append("author", document.getElementById("author").value || "");
+      fd.append("translator", document.getElementById("translator").value || "");
+      fd.append("url", document.getElementById("sourceUrl").value || "");
       const key = adminKey();
       if (!key) {
         setNotice("Enter the admin key before uploading.", true);
@@ -567,7 +693,7 @@ def _feedback_page() -> str:
         }
         const data = await resp.json();
         setNotice(
-          "Indexed " + data.vectors_upserted + " chunks into " + data.vector_db + ":" + data.index_name +
+          "Indexed " + data.vectors_upserted + " chunks from " + data.source_title + " into " + data.vector_db + ":" + data.index_name +
           (data.namespace ? (" (namespace: " + data.namespace + ")") : "") + "."
         );
       } catch (e) {
@@ -575,8 +701,52 @@ def _feedback_page() -> str:
       }
     }
 
+    async function uploadAudio() {
+      const fileInput = document.getElementById("audioFile");
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        setNotice("Please choose an audio file first.", true);
+        return;
+      }
+      const key = adminKey();
+      if (!key) {
+        setNotice("Enter the admin key before uploading audio.", true);
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("language_code", document.getElementById("audioLang").value || "hi-IN");
+      fd.append("description", document.getElementById("audioTitle").value || file.name);
+      fd.append("source_title", document.getElementById("audioTitle").value || file.name);
+      fd.append("source", document.getElementById("audioSourceId").value || "");
+      fd.append("section", document.getElementById("audioSection").value || "");
+
+      setNotice("Transcribing, translating when needed, and indexing audio...");
+      try {
+        const resp = await fetch("/api/v1/audio/transcribe", {
+          method: "POST",
+          headers: { "X-Admin-Key": key },
+          body: fd,
+        });
+        if (!resp.ok) {
+          let msg = resp.statusText;
+          try {
+            const body = await resp.json();
+            if (body && body.detail) msg = body.detail;
+          } catch (_) {}
+          throw new Error(msg);
+        }
+        const data = await resp.json();
+        setNotice("Indexed audio transcript chunks: " + data.chunks_created + " (" + data.transcript_file_name + ").");
+      } catch (e) {
+        setNotice("Audio upload failed: " + e.message, true);
+      }
+    }
+
     document.getElementById("loadBtn").addEventListener("click", load);
     document.getElementById("uploadBtn").addEventListener("click", uploadDocument);
+    document.getElementById("audioUploadBtn").addEventListener("click", uploadAudio);
     load();
   </script>
 </body>
@@ -591,7 +761,7 @@ async def feedback_admin() -> HTMLResponse:
 # ── Dataset management endpoints ──────────────────────────────────────────────
 
 @router.get("/admin/datasets")
-async def list_datasets() -> dict:
+async def list_datasets(_: None = Depends(require_admin_api_key)) -> dict:
     return {"datasets": dataset_store.list_all()}
 
 
@@ -600,7 +770,7 @@ class DatasetToggle(BaseModel):
 
 
 @router.patch("/admin/datasets/{name}")
-async def toggle_dataset(name: str, body: DatasetToggle) -> dict:
+async def toggle_dataset(name: str, body: DatasetToggle, _: None = Depends(require_admin_api_key)) -> dict:
     ok = dataset_store.set_active(name, body.active)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Dataset '{name}' not found")
@@ -608,7 +778,7 @@ async def toggle_dataset(name: str, body: DatasetToggle) -> dict:
 
 
 @router.delete("/admin/datasets/{name}")
-async def delete_dataset(name: str, purge_vectors: bool = False) -> dict:
+async def delete_dataset(name: str, purge_vectors: bool = False, _: None = Depends(require_admin_api_key)) -> dict:
     if purge_vectors and settings.vector_db_backend.lower() == "pinecone":
         try:
             pc = get_pinecone()
@@ -631,17 +801,18 @@ def _admin_page() -> str:
   <title>DharmaGPT Admin</title>
   <style>
     :root{--bg:#0b1220;--panel:rgba(17,24,39,.88);--panel2:rgba(15,23,42,.92);--text:#e5eefb;--muted:#96a7c3;--line:rgba(148,163,184,.22);--accent:#f59e0b;--shadow:0 24px 80px rgba(0,0,0,.35);--green:rgba(34,197,94,.18);--greenb:rgba(34,197,94,.35);--greentext:#bbf7d0;--red:rgba(239,68,68,.18);--redb:rgba(239,68,68,.35);--redtext:#fecaca}
-    *{box-sizing:border-box}
-    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text);background:radial-gradient(circle at top left,rgba(245,158,11,.18),transparent 28%),radial-gradient(circle at top right,rgba(59,130,246,.18),transparent 22%),linear-gradient(180deg,#0b1220 0%,#0f172a 100%);min-height:100vh}
-    .shell{max-width:980px;margin:0 auto;padding:28px 20px}
+    *{box-sizing:border-box;min-width:0}
+    html{min-height:100%;background:#0b1220;overflow-x:hidden}
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text);background:radial-gradient(circle at top left,rgba(245,158,11,.18),transparent 28%),radial-gradient(circle at top right,rgba(59,130,246,.18),transparent 22%),linear-gradient(180deg,#0b1220 0%,#0f172a 100%);min-height:100vh;min-height:100dvh;overflow-x:hidden}
+    .shell{width:100%;max-width:min(980px,100vw);margin:0 auto;padding:28px 20px;overflow-x:hidden}
     h1{margin:0 0 24px;font-size:24px}
-    .tabs{display:flex;gap:4px;margin-bottom:24px;border-bottom:1px solid var(--line);padding-bottom:0}
-    .tab{padding:10px 20px;border-radius:10px 10px 0 0;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer;font-size:14px;font-weight:500;border-bottom:none;transition:color .15s}
+    .tabs{display:flex;gap:4px;margin-bottom:24px;border-bottom:1px solid var(--line);padding-bottom:0;overflow-x:auto;scrollbar-width:thin}
+    .tab{flex:0 0 auto;padding:10px 20px;border-radius:10px 10px 0 0;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer;font-size:14px;font-weight:500;border-bottom:none;transition:color .15s}
     .tab.active{background:var(--panel);border-color:var(--line);border-bottom-color:var(--bg);color:var(--text)}
     .pane{display:none}.pane.active{display:block}
-    .card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;margin-bottom:16px;box-shadow:var(--shadow)}
+    .card{width:100%;max-width:100%;overflow:hidden;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;margin-bottom:16px;box-shadow:var(--shadow)}
     label{display:block;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
-    input,select,textarea{width:100%;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:9px 13px;font-size:14px;outline:none;font-family:inherit}
+    input,select,textarea{width:100%;max-width:100%;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:9px 13px;font-size:14px;outline:none;font-family:inherit}
     input:focus,select:focus,textarea:focus{border-color:rgba(245,158,11,.6)}
     .row{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-bottom:14px}
     .row.two{grid-template-columns:1fr 1fr}
@@ -662,17 +833,31 @@ def _admin_page() -> str:
     .badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 10px;border-radius:999px}
     .badge.on{background:var(--green);color:var(--greentext);border:1px solid var(--greenb)}
     .badge.off{background:var(--red);color:var(--redtext);border:1px solid var(--redb)}
-    .empty{color:var(--muted);padding:30px;text-align:center;border:1px dashed var(--line);border-radius:14px}
+    .empty{color:var(--muted);padding:30px;text-align:center;border:1px dashed var(--line);border-radius:14px;overflow-wrap:anywhere}
     .answer-box{white-space:pre-wrap;line-height:1.65;font-size:14px;background:rgba(2,6,23,.45);border-radius:12px;border:1px solid var(--line);padding:14px;margin:12px 0}
     .source-chip{font-size:11px;padding:4px 8px;border-radius:8px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.25);color:#93c5fd;display:inline-block;margin:3px 3px 3px 0}
     .score{font-size:11px;color:var(--muted)}
     .section-title{font-size:16px;font-weight:600;margin-bottom:14px}
     .divider{border:0;border-top:1px solid var(--line);margin:20px 0}
+    @media(max-width:520px){
+      .shell{padding:24px 14px}
+      h1{font-size:26px;line-height:1.15}
+      .card{padding:18px}
+      .row,.row.two,.row.three{grid-template-columns:1fr}
+      .tabs{display:flex;flex-direction:column;overflow:visible;border-bottom:0;gap:6px}
+      .tab{width:100%;padding:10px 12px;border-radius:10px;border:1px solid transparent;text-align:center}
+      .tab.active{border-color:var(--line)}
+      .empty{padding:28px 16px}
+    }
   </style>
 </head>
 <body>
 <div class="shell">
   <h1>DharmaGPT Admin</h1>
+  <div class="card" style="padding:14px;margin-bottom:18px">
+    <label>Admin/API Key</label>
+    <input id="admin-key" type="password" placeholder="X-Admin-Key" autocomplete="off"/>
+  </div>
   <div class="tabs">
     <button class="tab active" onclick="showTab('datasets')">Datasets</button>
     <button class="tab" onclick="showTab('upload')">Upload</button>
@@ -788,6 +973,18 @@ def _admin_page() -> str:
 
 <script>
 const API = "/api/v1";
+const savedAdminKey = localStorage.getItem("dharmagpt.adminKey") || "";
+document.getElementById("admin-key").value = savedAdminKey;
+
+function adminKey() {
+  const key = document.getElementById("admin-key").value.trim();
+  if(key) localStorage.setItem("dharmagpt.adminKey", key);
+  return key;
+}
+function adminHeaders(extra={}) {
+  const key = adminKey();
+  return key ? {...extra, "X-Admin-Key": key, "X-API-Key": key} : extra;
+}
 
 // ── Tab switching ──────────────────────────────────────────────────────────────
 function showTab(name) {
@@ -812,7 +1009,7 @@ function esc(s){ return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")
 // ── Datasets ──────────────────────────────────────────────────────────────────
 async function loadDatasets() {
   try {
-    const r = await fetch("/admin/datasets");
+    const r = await fetch("/admin/datasets", {headers: adminHeaders()});
     const d = await r.json();
     renderDatasets(d.datasets || []);
   } catch(e) { setNotice("ds-notice","Load failed: "+e.message,true); }
@@ -845,7 +1042,7 @@ function renderDatasets(datasets) {
 async function toggleDs(name, active) {
   try {
     const r = await fetch(`/admin/datasets/${encodeURIComponent(name)}`, {
-      method:"PATCH", headers:{"Content-Type":"application/json"},
+      method:"PATCH", headers:adminHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({active: !!active})
     });
     if(!r.ok) throw new Error(await r.text());
@@ -857,7 +1054,7 @@ async function toggleDs(name, active) {
 async function deleteDs(name) {
   const purge = confirm(`Delete dataset "${name}"?\n\nClick OK to also purge vectors from Pinecone, or Cancel to only remove from registry.`);
   try {
-    const r = await fetch(`/admin/datasets/${encodeURIComponent(name)}?purge_vectors=${purge}`, {method:"DELETE"});
+    const r = await fetch(`/admin/datasets/${encodeURIComponent(name)}?purge_vectors=${purge}`, {method:"DELETE", headers:adminHeaders()});
     if(!r.ok) throw new Error(await r.text());
     setNotice("ds-notice", `Deleted ${name}${purge?" (vectors purged)":""}.`);
     loadDatasets();
@@ -876,7 +1073,7 @@ async function uploadAudio() {
   fd.append("description", document.getElementById("au-desc").value.trim() || file.name);
   setNotice("au-notice","Transcribing and indexing… this may take 30–90s.");
   try {
-    const r = await fetch(`${API}/audio/transcribe`, {method:"POST", body:fd});
+    const r = await fetch(`${API}/audio/transcribe`, {method:"POST", headers:adminHeaders(), body:fd});
     if(!r.ok){ const b=await r.json(); throw new Error(b.detail||r.statusText); }
     const d = await r.json();
     setNotice("au-notice",`Done. ${d.chunks_created} chunks indexed. Translation: ${d.translation_backend||"none"}.`);
@@ -894,7 +1091,7 @@ async function uploadDoc() {
   fd.append("dataset_name", document.getElementById("doc-dataset").value.trim());
   setNotice("doc-notice","Uploading and indexing…");
   try {
-    const r = await fetch("/admin/vector/upload", {method:"POST", body:fd});
+    const r = await fetch("/admin/vector/upload", {method:"POST", headers:adminHeaders(), body:fd});
     if(!r.ok){ const b=await r.json(); throw new Error(b.detail||r.statusText); }
     const d = await r.json();
     setNotice("doc-notice",`Done. ${d.vectors_upserted} chunks indexed to ${d.vector_db}${d.dataset_id?" (dataset: "+d.dataset_id+")":""}.`);
@@ -912,7 +1109,7 @@ async function runQuery() {
   document.getElementById("q-result").style.display="none";
   try {
     const r = await fetch(`${API}/query`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers:adminHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({
         query,
         mode: document.getElementById("q-mode").value,
@@ -951,7 +1148,7 @@ async function loadGold() {
   setNotice("gold-notice","Loading…");
   try {
     const [pr,gr] = await Promise.all([
-      fetch(`${API}/feedback/pending`), fetch(`${API}/feedback/gold`)
+      fetch(`${API}/feedback/pending`, {headers:adminHeaders()}), fetch(`${API}/feedback/gold`, {headers:adminHeaders()})
     ]);
     pendingData = (await pr.json()).pending||[];
     goldData    = (await gr.json()).gold||[];
@@ -990,7 +1187,7 @@ async function reviewGold(qid, status){
   const ansEl = document.getElementById("ga-"+qid);
   const body = {review_status:status, gold_answer: status==="approved"?(ansEl?ansEl.value.trim():null):null};
   try {
-    const r = await fetch(`${API}/feedback/${encodeURIComponent(qid)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const r = await fetch(`${API}/feedback/${encodeURIComponent(qid)}`,{method:"PATCH",headers:adminHeaders({"Content-Type":"application/json"}),body:JSON.stringify(body)});
     if(!r.ok) throw new Error(r.statusText);
     pendingData = pendingData.filter(x=>x.query_id!==qid);
     document.getElementById("gc-"+qid)?.remove();

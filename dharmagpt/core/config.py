@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     # OpenAI (embeddings)
     openai_api_key: str = ""
+    embedding_backend: str = "openai"  # openai | local_hash
     embedding_model: str = "text-embedding-3-large"
     embedding_dims: int = 3072
 

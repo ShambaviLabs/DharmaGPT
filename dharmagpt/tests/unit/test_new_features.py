@@ -223,20 +223,17 @@ async def test_chunker_routes_to_local_when_backend_is_local(monkeypatch):
     monkeypatch.setattr(settings, "vector_db_backend", "local")
     monkeypatch.setattr(settings, "openai_api_key", "fake-key")
 
-    fake_embed = MagicMock()
-    fake_embed.data = [MagicMock(embedding=[0.1] * 10)]
-
-    mock_openai = MagicMock()
-    mock_openai.embeddings.create = AsyncMock(return_value=fake_embed)
-
     upserted = []
 
     def fake_upsert(index_name, namespace, records):
         upserted.extend(records)
         return len(records)
 
-    with patch("pipelines.audio_chunker.AsyncOpenAI", return_value=mock_openai), \
-         patch("core.local_vector_store.upsert_vectors", side_effect=fake_upsert):
+    async def fake_embed_texts(texts):
+        return [[0.1] * 10 for _ in texts], "test"
+
+    with patch("pipelines.audio_chunker.embed_texts", side_effect=fake_embed_texts), \
+         patch("pipelines.audio_chunker.upsert_vectors", side_effect=fake_upsert):
 
         from pipelines.audio_chunker import chunk_and_index
         transcript_data = {
@@ -248,7 +245,7 @@ async def test_chunker_routes_to_local_when_backend_is_local(monkeypatch):
         }
         result = await chunk_and_index(
             transcript_data, "test.mp3",
-            {"language_code": "te-IN", "description": "test"},
+            {"language_code": "en", "description": "test"},
             dataset_id="test-dataset",
         )
 
@@ -265,26 +262,23 @@ async def test_chunker_stamps_dataset_id_on_metadata(monkeypatch):
     monkeypatch.setattr(settings, "vector_db_backend", "local")
     monkeypatch.setattr(settings, "openai_api_key", "fake-key")
 
-    fake_embed = MagicMock()
-    fake_embed.data = [MagicMock(embedding=[0.0] * 10)]
-
-    mock_openai = MagicMock()
-    mock_openai.embeddings.create = AsyncMock(return_value=fake_embed)
-
     stored_records = []
 
     def capture_upsert(index_name, namespace, records):
         stored_records.extend(records)
         return len(records)
 
-    with patch("pipelines.audio_chunker.AsyncOpenAI", return_value=mock_openai), \
-         patch("core.local_vector_store.upsert_vectors", side_effect=capture_upsert):
+    async def fake_embed_texts(texts):
+        return [[0.0] * 10 for _ in texts], "test"
+
+    with patch("pipelines.audio_chunker.embed_texts", side_effect=fake_embed_texts), \
+         patch("pipelines.audio_chunker.upsert_vectors", side_effect=capture_upsert):
 
         from pipelines.audio_chunker import chunk_and_index
         await chunk_and_index(
             {"transcript": "test content for dataset stamping check", "words": []},
             "clip.mp3",
-            {"language_code": "te-IN", "description": "clip"},
+            {"language_code": "en", "description": "clip"},
             dataset_id="my-dataset",
         )
 
