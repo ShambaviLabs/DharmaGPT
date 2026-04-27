@@ -1,0 +1,363 @@
+"""
+test_new_features.py — unit tests for dataset management, audio auto-split,
+chunker backend routing, and retrieval dataset filtering.
+
+All tests are offline — no Sarvam, Pinecone, or OpenAI calls are made.
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+
+# ── dataset_store ─────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def tmp_db(tmp_path, monkeypatch):
+    """Point dataset_store at a throwaway SQLite DB for each test."""
+    db_path = tmp_path / "test_vectors.sqlite3"
+    import core.dataset_store as ds
+    monkeypatch.setattr(ds, "_DB_PATH", db_path)
+    # Clear module-level cache so _connect picks up the patched path
+    yield ds
+
+
+def test_register_and_list(tmp_db):
+    tmp_db.register("ramayanam", "Ramayanam by Chaganti")
+    datasets = tmp_db.list_all()
+    assert len(datasets) == 1
+    assert datasets[0]["name"] == "ramayanam"
+    assert datasets[0]["display_name"] == "Ramayanam by Chaganti"
+    assert datasets[0]["active"] == 1
+    assert datasets[0]["vector_count"] == 0
+
+
+def test_register_is_idempotent(tmp_db):
+    tmp_db.register("ramayanam")
+    tmp_db.register("ramayanam")  # second call should not raise or duplicate
+    assert len(tmp_db.list_all()) == 1
+
+
+def test_increment_count(tmp_db):
+    tmp_db.register("gita")
+    tmp_db.increment_count("gita", 42)
+    assert tmp_db.list_all()[0]["vector_count"] == 42
+    tmp_db.increment_count("gita", 8)
+    assert tmp_db.list_all()[0]["vector_count"] == 50
+
+
+def test_set_active_false_and_back(tmp_db):
+    tmp_db.register("mahabharata")
+    assert tmp_db.set_active("mahabharata", False) is True
+    assert tmp_db.list_all()[0]["active"] == 0
+    assert tmp_db.set_active("mahabharata", True) is True
+    assert tmp_db.list_all()[0]["active"] == 1
+
+
+def test_set_active_missing_returns_false(tmp_db):
+    assert tmp_db.set_active("nonexistent", False) is False
+
+
+def test_get_active_names_excludes_inactive(tmp_db):
+    tmp_db.register("ds_a")
+    tmp_db.register("ds_b")
+    tmp_db.set_active("ds_b", False)
+    active = tmp_db.get_active_names()
+    assert "ds_a" in active
+    assert "ds_b" not in active
+
+
+def test_get_active_names_empty(tmp_db):
+    assert tmp_db.get_active_names() == []
+
+
+def test_any_registered_false_when_empty(tmp_db):
+    assert tmp_db.any_registered() is False
+
+
+def test_any_registered_true_after_register(tmp_db):
+    tmp_db.register("test")
+    assert tmp_db.any_registered() is True
+
+
+def test_remove_dataset(tmp_db):
+    tmp_db.register("to_delete")
+    assert tmp_db.remove("to_delete") is True
+    assert tmp_db.list_all() == []
+
+
+def test_remove_missing_returns_false(tmp_db):
+    assert tmp_db.remove("ghost") is False
+
+
+# ── translate_corpus glob fix ─────────────────────────────────────────────────
+
+def test_translate_corpus_globs_subdirectories(tmp_path, monkeypatch):
+    """translate_corpus.py must find JSONL files in subdirectories."""
+    import scripts.translate_corpus as tc
+    monkeypatch.setattr(tc, "PROCESSED_DIR", tmp_path)
+
+    # file directly in processed/
+    (tmp_path / "seed.jsonl").write_text('{"text":"x","language":"te"}\n')
+    # file in subdirectory (audio_transcript/...)
+    sub = tmp_path / "audio_transcript" / "part1"
+    sub.mkdir(parents=True)
+    (sub / "part01.jsonl").write_text('{"text":"y","language":"te"}\n')
+
+    files = sorted(tmp_path.glob("**/*.jsonl"))
+    assert len(files) == 2
+
+
+# ── audio auto-split ──────────────────────────────────────────────────────────
+
+def test_split_threshold_constant():
+    from api.routes.audio import _SPLIT_THRESHOLD_BYTES, _SEGMENT_SECS
+    assert _SPLIT_THRESHOLD_BYTES == 2 * 1024 * 1024
+    assert _SEGMENT_SECS == 29
+
+
+@pytest.mark.asyncio
+async def test_small_file_skips_split():
+    """Files under threshold go straight to _transcribe_audio without splitting."""
+    small_bytes = b"x" * 100  # 100 bytes << 2MB threshold
+
+    fake_result = ({"transcript": "small clip text", "words": []}, "sarvam_stt", "saaras:v3")
+
+    with patch("api.routes.audio._transcribe_audio", new=AsyncMock(return_value=fake_result)) as mock_stt, \
+         patch("api.routes.audio._split_audio_to_segments") as mock_split:
+
+        from api.routes.audio import _transcribe_with_auto_split
+        result = await _transcribe_with_auto_split(small_bytes, "clip.mp3", "te-IN", ".mp3")
+
+        mock_stt.assert_called_once()
+        mock_split.assert_not_called()
+        assert result[0]["transcript"] == "small clip text"
+
+
+@pytest.mark.asyncio
+async def test_large_file_triggers_split_and_merges_transcripts():
+    """Files over threshold are split; segment transcripts are merged."""
+    large_bytes = b"x" * (3 * 1024 * 1024)  # 3MB > 2MB threshold
+
+    seg1 = {"transcript": "first segment text", "words": [
+        {"word": "first", "start": 0.1, "end": 0.5},
+        {"word": "segment", "start": 0.6, "end": 1.0},
+    ]}
+    seg2 = {"transcript": "second segment text", "words": [
+        {"word": "second", "start": 0.2, "end": 0.6},
+    ]}
+
+    fake_stt_calls = [
+        (seg1, "sarvam_stt", "saaras:v3"),
+        (seg2, "sarvam_stt", "saaras:v3"),
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # Create two fake segment files
+        seg_paths = []
+        for i in range(2):
+            p = os.path.join(tmp_dir, f"seg{i:04d}.mp3")
+            Path(p).write_bytes(b"fake_audio")
+            seg_paths.append(p)
+
+        with patch("api.routes.audio._split_audio_to_segments", return_value=(seg_paths, tmp_dir)), \
+             patch("api.routes.audio._transcribe_audio", new=AsyncMock(side_effect=fake_stt_calls)), \
+             patch("builtins.open", side_effect=lambda *a, **kw: open(*a, **kw)):
+
+            from api.routes.audio import _transcribe_with_auto_split
+            result_data, mode, version = await _transcribe_with_auto_split(
+                large_bytes, "big_audio.mp3", "te-IN", ".mp3"
+            )
+
+    assert "first segment text" in result_data["transcript"]
+    assert "second segment text" in result_data["transcript"]
+    assert mode == "sarvam_stt"
+
+    # Word timestamps from segment 2 should be offset by 29s
+    words = result_data["words"]
+    seg2_word = next(w for w in words if w["word"] == "second")
+    assert seg2_word["start"] == pytest.approx(0.2 + 29, abs=0.01)
+    assert seg2_word["end"] == pytest.approx(0.6 + 29, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_failed_segment_is_skipped_others_succeed():
+    """If one segment fails STT, it is skipped and remaining are merged."""
+    large_bytes = b"x" * (3 * 1024 * 1024)
+
+    async def stt_side_effect(audio_bytes, filename, lang, suffix):
+        if "seg0001" in filename:
+            raise RuntimeError("Sarvam timeout")
+        return {"transcript": "good text", "words": []}, "sarvam_stt", "saaras:v3"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        seg_paths = []
+        for i in range(2):
+            p = os.path.join(tmp_dir, f"seg{i:04d}.mp3")
+            Path(p).write_bytes(b"fake")
+            seg_paths.append(p)
+
+        with patch("api.routes.audio._split_audio_to_segments", return_value=(seg_paths, tmp_dir)), \
+             patch("api.routes.audio._transcribe_audio", new=AsyncMock(side_effect=stt_side_effect)):
+
+            from api.routes.audio import _transcribe_with_auto_split
+            result_data, _, _ = await _transcribe_with_auto_split(
+                large_bytes, "big.mp3", "te-IN", ".mp3"
+            )
+
+    assert result_data["transcript"] == "good text"
+
+
+# ── audio_chunker backend routing ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_chunker_routes_to_local_when_backend_is_local(monkeypatch):
+    """chunk_and_index upserts to local SQLite when VECTOR_DB_BACKEND=local."""
+    from core.config import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "vector_db_backend", "local")
+    monkeypatch.setattr(settings, "openai_api_key", "fake-key")
+
+    fake_embed = MagicMock()
+    fake_embed.data = [MagicMock(embedding=[0.1] * 10)]
+
+    mock_openai = MagicMock()
+    mock_openai.embeddings.create = AsyncMock(return_value=fake_embed)
+
+    upserted = []
+
+    def fake_upsert(index_name, namespace, records):
+        upserted.extend(records)
+        return len(records)
+
+    with patch("pipelines.audio_chunker.AsyncOpenAI", return_value=mock_openai), \
+         patch("core.local_vector_store.upsert_vectors", side_effect=fake_upsert):
+
+        from pipelines.audio_chunker import chunk_and_index
+        transcript_data = {
+            "transcript": "రామ రామ రామ జయ రాజా రామ",
+            "words": [
+                {"word": w, "start": i * 0.5, "end": i * 0.5 + 0.4}
+                for i, w in enumerate("రామ రామ రామ జయ రాజా రామ".split())
+            ],
+        }
+        result = await chunk_and_index(
+            transcript_data, "test.mp3",
+            {"language_code": "te-IN", "description": "test"},
+            dataset_id="test-dataset",
+        )
+
+    assert result["chunks_created"] > 0
+    assert len(upserted) > 0
+    assert upserted[0]["metadata"]["dataset_id"] == "test-dataset"
+
+
+@pytest.mark.asyncio
+async def test_chunker_stamps_dataset_id_on_metadata(monkeypatch):
+    """Every chunk must carry dataset_id in its Pinecone/local metadata."""
+    from core.config import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "vector_db_backend", "local")
+    monkeypatch.setattr(settings, "openai_api_key", "fake-key")
+
+    fake_embed = MagicMock()
+    fake_embed.data = [MagicMock(embedding=[0.0] * 10)]
+
+    mock_openai = MagicMock()
+    mock_openai.embeddings.create = AsyncMock(return_value=fake_embed)
+
+    stored_records = []
+
+    def capture_upsert(index_name, namespace, records):
+        stored_records.extend(records)
+        return len(records)
+
+    with patch("pipelines.audio_chunker.AsyncOpenAI", return_value=mock_openai), \
+         patch("core.local_vector_store.upsert_vectors", side_effect=capture_upsert):
+
+        from pipelines.audio_chunker import chunk_and_index
+        await chunk_and_index(
+            {"transcript": "test content for dataset stamping check", "words": []},
+            "clip.mp3",
+            {"language_code": "te-IN", "description": "clip"},
+            dataset_id="my-dataset",
+        )
+
+    for rec in stored_records:
+        assert rec["metadata"].get("dataset_id") == "my-dataset"
+
+
+# ── retrieval dataset filtering ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_retrieval_returns_empty_when_all_datasets_disabled(monkeypatch, tmp_db):
+    """If datasets are registered but all inactive, retrieve() returns []."""
+    tmp_db.register("ds1")
+    tmp_db.set_active("ds1", False)
+
+    import core.retrieval as retrieval_mod
+    monkeypatch.setattr(retrieval_mod, "any_registered", tmp_db.any_registered)
+    monkeypatch.setattr(retrieval_mod, "get_active_names", tmp_db.get_active_names)
+
+    from core.config import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
+    monkeypatch.setattr(settings, "openai_api_key", "fake")
+
+    fake_embed_resp = MagicMock()
+    fake_embed_resp.data = [MagicMock(embedding=[0.1] * 10)]
+
+    with patch("core.retrieval.get_openai") as mock_get_openai:
+        mock_client = MagicMock()
+        mock_client.embeddings.create = AsyncMock(return_value=fake_embed_resp)
+        mock_get_openai.return_value = mock_client
+
+        from core.retrieval import retrieve
+        results = await retrieve("What is dharma?")
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_retrieval_no_dataset_filter_when_none_registered(monkeypatch, tmp_db):
+    """If no datasets registered at all, Pinecone query has no dataset_id filter."""
+    import core.retrieval as retrieval_mod
+    monkeypatch.setattr(retrieval_mod, "any_registered", tmp_db.any_registered)
+    monkeypatch.setattr(retrieval_mod, "get_active_names", tmp_db.get_active_names)
+
+    from core.config import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
+    monkeypatch.setattr(settings, "openai_api_key", "fake")
+    monkeypatch.setattr(settings, "rag_min_score", 0.0)
+
+    fake_embed_resp = MagicMock()
+    fake_embed_resp.data = [MagicMock(embedding=[0.1] * 10)]
+
+    pinecone_result = MagicMock()
+    pinecone_result.matches = []
+
+    mock_index = MagicMock()
+    mock_index.query.return_value = pinecone_result
+
+    with patch("core.retrieval.get_openai") as mock_get_openai, \
+         patch("core.retrieval.get_pinecone") as mock_get_pc:
+
+        mock_client = MagicMock()
+        mock_client.embeddings.create = AsyncMock(return_value=fake_embed_resp)
+        mock_get_openai.return_value = mock_client
+
+        mock_pc = MagicMock()
+        mock_pc.Index.return_value = mock_index
+        mock_get_pc.return_value = mock_pc
+
+        from core.retrieval import retrieve
+        await retrieve("What is dharma?")
+
+    call_kwargs = mock_index.query.call_args.kwargs
+    assert "dataset_id" not in (call_kwargs.get("filter") or {})

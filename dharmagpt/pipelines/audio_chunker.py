@@ -195,7 +195,7 @@ def _summarize_provenance(outcomes: list[TranslationOutcome | None]) -> dict[str
     }
 
 
-async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: dict) -> dict:
+async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: dict, dataset_id: str = "") -> dict:
     """Main entry: chunk transcript -> translate if needed -> embed -> upsert to Pinecone."""
     words = transcript_data.get("words", [])
     raw_text = transcript_data.get("transcript", "")
@@ -229,7 +229,7 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
     records = []
 
     try:
-        # Embed all chunks in one batch. If translation exists, include it to improve retrieval.
+        # Embed all chunks in one batch. Include translation for richer retrieval.
         openai = AsyncOpenAI(api_key=settings.openai_api_key)
         texts = []
         for chunk, translated in zip(raw_chunks, translated_chunks):
@@ -240,9 +240,6 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
         embed_response = await openai.embeddings.create(model=settings.embedding_model, input=texts)
         vectors = [r.embedding for r in embed_response.data]
 
-        # Upsert to Pinecone
-        pc = Pinecone(api_key=settings.pinecone_api_key)
-        index = pc.Index(settings.pinecone_index_name)
         for i, (chunk, vec, translated, outcome) in enumerate(zip(raw_chunks, vectors, translated_chunks, outcomes)):
             record_metadata = {
                 "source_type": "audio",
@@ -266,6 +263,8 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
                 "translation_fallback_reason": provenance["translation_fallback_reason"] or "",
                 "translation_attempted_backends": provenance["translation_attempted_backends"] or [],
             }
+            if dataset_id:
+                record_metadata["dataset_id"] = dataset_id
             if translated.strip():
                 record_metadata["translated_text"] = translated.strip()
                 record_metadata["translated_text_preview"] = translated[:300]
@@ -280,16 +279,26 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
                 }
             )
 
-        # Batch upsert
+        # Route to local SQLite or Pinecone based on VECTOR_DB_BACKEND
+        backend = settings.vector_db_backend.lower()
         batch_size = 100
-        for i in range(0, len(records), batch_size):
-            index.upsert(vectors=records[i : i + batch_size])
+        if backend == "local":
+            from core.local_vector_store import upsert_vectors
+            import asyncio
+            for i in range(0, len(records), batch_size):
+                await asyncio.to_thread(
+                    upsert_vectors,
+                    index_name=settings.local_vector_index_name,
+                    namespace=settings.local_vector_namespace,
+                    records=records[i : i + batch_size],
+                )
+        else:
+            pc = Pinecone(api_key=settings.pinecone_api_key)
+            index = pc.Index(settings.pinecone_index_name)
+            for i in range(0, len(records), batch_size):
+                index.upsert(vectors=records[i : i + batch_size])
     except Exception as exc:
-        log.warning(
-            "audio_indexing_skipped",
-            file=filename,
-            reason=str(exc),
-        )
+        log.warning("audio_indexing_skipped", file=filename, reason=str(exc))
         records = []
 
     translated_transcript = "\n".join(piece for piece in translated_chunks if piece.strip()) if needs_translation else None

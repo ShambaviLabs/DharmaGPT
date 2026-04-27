@@ -163,7 +163,7 @@ def main() -> None:
         if not files[0].exists():
             raise SystemExit(f"File not found: {files[0]}")
     else:
-        files = sorted(PROCESSED_DIR.glob("*.jsonl"))
+        files = sorted(PROCESSED_DIR.glob("**/*.jsonl"))
 
     if not files:
         raise SystemExit(f"No JSONL files found in {PROCESSED_DIR}")

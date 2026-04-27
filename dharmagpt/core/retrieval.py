@@ -3,6 +3,7 @@ from pinecone import Pinecone
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 from core.config import get_settings
+from core.dataset_store import any_registered, get_active_names
 from core.local_vector_store import query_vectors
 from models.schemas import SourceChunk
 
@@ -74,6 +75,11 @@ async def retrieve(
     Returns SourceChunk list sorted by relevance score.
     """
     top_k = top_k or settings.rag_top_k
+
+    # Early-exit before any embedding or DB calls if all datasets are disabled
+    if any_registered() and not get_active_names():
+        return []
+
     vector = await embed_query(query)
 
     matches: list[dict]
@@ -97,6 +103,10 @@ async def retrieve(
             pf["kanda"] = {"$eq": filter_section}
         if filter_source_type:
             pf["source_type"] = {"$eq": filter_source_type}
+
+        # Dataset filter — only apply when datasets have been registered
+        if any_registered():
+            pf["dataset_id"] = {"$in": get_active_names()}
 
         results = index.query(
             vector=vector,

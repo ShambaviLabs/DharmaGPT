@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -7,6 +9,7 @@ import httpx
 import structlog
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from models.schemas import AudioTranscribeResponse
+from core import dataset_store
 from core.config import get_settings
 from pipelines.audio_chunker import chunk_and_index
 from utils.naming import canonical_jsonl_filename, normalize_language_tag, part_number_from_filename, source_stem_from_audio_filename
@@ -17,6 +20,38 @@ settings = get_settings()
 
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
 SUPPORTED_FORMATS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus"}
+
+# Files larger than this are split into 29s segments before STT.
+# Sarvam saaras:v3 processes ~30s max per request; 2MB ≈ ~2 min @ 128kbps.
+_SPLIT_THRESHOLD_BYTES = 2 * 1024 * 1024
+_SEGMENT_SECS = 29
+
+
+def _ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        return "ffmpeg"
+
+
+def _split_audio_to_segments(source_path: str) -> tuple[list[str], str]:
+    """Split source audio into 29s MP3 segments. Returns (segment_paths, tmp_dir)."""
+    tmp_dir = tempfile.mkdtemp(prefix="dharma_split_")
+    out_pattern = os.path.join(tmp_dir, "seg%04d.mp3")
+    cmd = [
+        _ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+        "-i", source_path,
+        "-f", "segment", "-segment_time", str(_SEGMENT_SECS),
+        "-reset_timestamps", "1", "-c:a", "libmp3lame", out_pattern,
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg split failed: {result.stderr.decode()[:400]}")
+    segs = sorted(Path(tmp_dir).glob("seg*.mp3"))
+    if not segs:
+        raise RuntimeError("ffmpeg produced no segments")
+    return [str(s) for s in segs], tmp_dir
 PROCESSED_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "processed"
 TRANSCRIPT_DIR = PROCESSED_DIR / "audio_transcript"
 
@@ -168,12 +203,83 @@ async def _transcribe_audio(audio_bytes: bytes, filename: str, language_code: st
     raise last_exc or RuntimeError("All STT backends failed")
 
 
+async def _transcribe_with_auto_split(
+    audio_bytes: bytes,
+    filename: str,
+    language_code: str,
+    suffix: str,
+) -> tuple[dict, str, str]:
+    """
+    Transparently splits large audio files into 29s segments before STT.
+    Sarvam saaras:v3 has a ~30s limit per request; anything larger must be chunked first.
+    Results from all segments are merged into a single transcript + word list.
+    """
+    if len(audio_bytes) <= _SPLIT_THRESHOLD_BYTES:
+        return await _transcribe_audio(audio_bytes, filename, language_code, suffix)
+
+    log.info("audio_auto_split_start", file=filename, size_mb=round(len(audio_bytes) / 1e6, 2))
+
+    # Write source to a temp file so ffmpeg can read it
+    tmp_src = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        tmp_src.write(audio_bytes)
+        tmp_src.close()
+        seg_paths, tmp_dir = await asyncio.to_thread(_split_audio_to_segments, tmp_src.name)
+    finally:
+        os.unlink(tmp_src.name)
+
+    log.info("audio_auto_split_done", segments=len(seg_paths))
+
+    all_text: list[str] = []
+    all_words: list[dict] = []
+    last_mode = "sarvam_stt"
+    last_version = "saaras:v3"
+    time_offset = 0.0
+
+    try:
+        for i, seg_path in enumerate(seg_paths):
+            seg_bytes = Path(seg_path).read_bytes()
+            seg_name = f"{Path(filename).stem}_seg{i:04d}.mp3"
+            try:
+                data, mode, version = await _transcribe_audio(seg_bytes, seg_name, language_code, ".mp3")
+                last_mode, last_version = mode, version
+                text = (data.get("transcript") or "").strip()
+                if text:
+                    all_text.append(text)
+                for w in data.get("words") or []:
+                    all_words.append({
+                        **w,
+                        "start": (w.get("start") or 0.0) + time_offset,
+                        "end": (w.get("end") or 0.0) + time_offset,
+                    })
+            except Exception as exc:
+                log.warning("segment_transcribe_failed", segment=i, error=str(exc))
+            time_offset += _SEGMENT_SECS
+    finally:
+        for p in seg_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
+
+    if not all_text:
+        raise RuntimeError("All segments failed to transcribe")
+
+    log.info("audio_auto_split_merged", segments=len(seg_paths), words=len(all_words))
+    return {"transcript": " ".join(all_text), "words": all_words}, last_mode, last_version
+
+
 @router.post("/transcribe", response_model=AudioTranscribeResponse)
 async def transcribe_audio(
     file: UploadFile = File(...),
     language_code: str = Form("hi-IN"),
     section: str = Form(None),
     description: str = Form(None),
+    dataset_name: str = Form(""),
 ) -> AudioTranscribeResponse:
     """
     Upload a Sanskrit/Hindi audio file (chanting, pravachanam, discourse).
@@ -190,7 +296,7 @@ async def transcribe_audio(
     log.info("audio_transcribe_start", file=file.filename, lang=language_code, size_mb=round(len(audio_bytes)/1e6, 2), stt_backend=settings.stt_backend)
 
     try:
-        transcript_data, transcription_mode, transcription_version = await _transcribe_audio(
+        transcript_data, transcription_mode, transcription_version = await _transcribe_with_auto_split(
             audio_bytes, file.filename, language_code, suffix
         )
     except Exception as e:
@@ -201,7 +307,11 @@ async def transcribe_audio(
     if not transcript_text:
         raise HTTPException(status_code=422, detail="No speech detected in audio file.")
 
-    # Chunk and index
+    # Register dataset and chunk/index
+    ds_id = dataset_name.strip()
+    if ds_id:
+        dataset_store.register(ds_id)
+
     file_metadata = {
         "language_code": language_code,
         "section": section,
@@ -211,7 +321,9 @@ async def transcribe_audio(
         "text_source": "Valmiki Ramayana",
         "source_file": file.filename,
     }
-    chunk_result = await chunk_and_index(transcript_data, file.filename, file_metadata)
+    chunk_result = await chunk_and_index(transcript_data, file.filename, file_metadata, dataset_id=ds_id)
+    if ds_id:
+        dataset_store.increment_count(ds_id, chunk_result.get("chunks_created", 0))
 
     transcript_language = normalize_language_tag(language_code)
     transcript_base = source_stem_from_audio_filename(file.filename, language=transcript_language)
