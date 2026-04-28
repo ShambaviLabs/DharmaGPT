@@ -88,6 +88,8 @@ export default function ChatScreen() {
           sources: res.sources,
           query_id: res.query_id,
           mode: res.mode,
+          llm_backend: res.llm_backend,
+          llm_model: res.llm_model,
         });
       } catch (err) {
         const msg =

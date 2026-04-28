@@ -38,6 +38,7 @@ tqdm==4.66.5
 tenacity==9.0.0
 structlog==24.4.0
 filelock==3.29.0
+psycopg[binary]==3.3.3
 
 # Dev
 pytest==8.3.3

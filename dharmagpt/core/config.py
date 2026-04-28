@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     cors_origins: str = "http://localhost:8081,http://localhost:8080,http://localhost:3000,null"
+    database_url: str = ""
 
     @property
     def cors_allow_all_dev(self) -> bool:
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
 
     # Generic LLM routing
     llm_backend: str = "anthropic"
+    llm_backend_order: str = "anthropic,openai,ollama"
     llm_model: str | None = None
     llm_api_key: str = ""
     llm_base_url: str = "http://localhost:11434"
@@ -43,6 +45,7 @@ class Settings(BaseSettings):
     embedding_backend: str = "openai"  # openai | local_hash
     embedding_model: str = "text-embedding-3-large"
     embedding_dims: int = 3072
+    openai_translation_model: str = "gpt-4.1-mini"
 
     # Pinecone
     pinecone_api_key: str = ""
@@ -50,7 +53,7 @@ class Settings(BaseSettings):
     pinecone_environment: str = "us-east-1"
 
     # Vector DB backend
-    vector_db_backend: str = "local"  # local | pinecone
+    vector_db_backend: str = "pinecone"  # pinecone (preferred)
     local_vector_index_name: str = "dharma-local"
     local_vector_namespace: str = "default"
 
@@ -63,7 +66,10 @@ class Settings(BaseSettings):
     indicwhisper_model: str = "openai/whisper-small"
 
     # Translation: when True, try local Ollama before cloud Anthropic in auto mode
-    translation_local_first: bool = True
+    translation_local_first: bool = False
+    translation_backend_order: str = "sarvam,anthropic,openai,ollama,indictrans2"
+    translation_max_workers: int = 1
+    sarvam_translation_model: str = "sarvam-translate:v1"
 
     # Admin / review API
     admin_api_key: str = ""

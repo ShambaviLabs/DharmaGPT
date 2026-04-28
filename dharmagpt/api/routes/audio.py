@@ -15,7 +15,9 @@ from api.auth import require_admin_api_key
 from models.schemas import AudioTranscribeResponse
 from core import dataset_store
 from core.config import get_settings
+from core.insight_store import record_ingestion_run
 from pipelines.audio_chunker import chunk_and_index
+from core.translation import reset_translation_provider_state
 from utils.naming import canonical_jsonl_filename, normalize_language_tag, part_number_from_filename, source_stem_from_audio_filename
 
 router = APIRouter()
@@ -321,6 +323,7 @@ async def transcribe_audio(
     if len(audio_bytes) > 100 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large. Max 100MB.")
     source_file_path, content_sha256 = _save_audio_source(file.filename or "audio", audio_bytes)
+    reset_translation_provider_state()
 
     log.info("audio_transcribe_start", file=file.filename, lang=language_code, size_mb=round(len(audio_bytes)/1e6, 2), stt_backend=settings.stt_backend)
 
@@ -354,7 +357,26 @@ async def transcribe_audio(
         "source_file_path": source_file_path,
         "content_sha256": content_sha256,
     }
-    chunk_result = await chunk_and_index(transcript_data, file.filename, file_metadata, dataset_id=ds_id)
+    try:
+        chunk_result = await chunk_and_index(transcript_data, file.filename, file_metadata, dataset_id=ds_id)
+    except Exception as exc:
+        record_ingestion_run(
+            kind="audio",
+            source=file_metadata["source"],
+            source_title=file_metadata["source_title"],
+            file_name=file.filename or "",
+            language=language_code,
+            dataset_id=ds_id,
+            status="failed",
+            error=str(exc),
+            transcription_mode=transcription_mode,
+            transcription_version=transcription_version,
+            metadata={
+                "source_file_path": source_file_path,
+                "content_sha256": content_sha256,
+            },
+        )
+        raise HTTPException(status_code=503, detail="Translation/indexing providers unavailable; retry later.") from exc
     if ds_id:
         dataset_store.increment_count(ds_id, chunk_result.get("chunks_created", 0))
 
@@ -418,8 +440,31 @@ async def transcribe_audio(
         translation_version=chunk_result.get("translation_version"),
         transcript_file=transcript_file_name,
     )
+    run_id = record_ingestion_run(
+        kind="audio",
+        source=file_metadata["source"],
+        source_title=file_metadata["source_title"],
+        file_name=file.filename or "",
+        language=language_code,
+        dataset_id=ds_id,
+        status="ok",
+        chunks=chunk_result["chunks_created"],
+        vectors=chunk_result.get("vectors_upserted") or 0,
+        vector_db=chunk_result.get("vector_db"),
+        embedding_backend=chunk_result.get("embedding_backend"),
+        transcription_mode=transcription_mode,
+        transcription_version=transcription_version,
+        translation_backend=chunk_result.get("translation_backend"),
+        translation_version=chunk_result.get("translation_version"),
+        metadata={
+            "transcript_file": str(transcript_path),
+            "source_file_path": source_file_path,
+            "content_sha256": content_sha256,
+        },
+    )
     _append_audio_audit({
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
         "role": "audio_transcript_indexed",
         "file_path": source_file_path,
         "original_filename": file.filename,
@@ -434,6 +479,10 @@ async def transcribe_audio(
         "vectors_upserted": chunk_result.get("vectors_upserted"),
         "vector_db": chunk_result.get("vector_db"),
         "embedding_backend": chunk_result.get("embedding_backend"),
+        "transcription_mode": transcription_mode,
+        "transcription_version": transcription_version,
+        "translation_backend": chunk_result.get("translation_backend"),
+        "translation_version": chunk_result.get("translation_version"),
     })
 
     return AudioTranscribeResponse(

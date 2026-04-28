@@ -5,6 +5,7 @@ import re
 from pinecone import Pinecone
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
+from core.chunk_store import fetch_chunks
 from core.config import get_settings
 from core.dataset_store import any_registered, get_active_names
 from core.local_vector_store import query_vectors
@@ -87,7 +88,13 @@ def _source_text_from_metadata(meta: dict) -> str:
     back to the preview when necessary.
     """
     base_text = (meta.get("text") or "").strip()
-    translated_text = (meta.get("translated_text") or meta.get("text_en") or meta.get("text_en_model") or "").strip()
+    translated_text = (
+        meta.get("translated_text")
+        or meta.get("text_en")
+        or meta.get("text_en_model")
+        or meta.get("translated_text_preview")
+        or ""
+    ).strip()
     preview = (meta.get("text_preview") or "").strip()
     language = (meta.get("language") or "").strip().lower()
 
@@ -103,6 +110,24 @@ def _source_text_from_metadata(meta: dict) -> str:
     if translated_text:
         return translated_text
     return preview
+
+
+def _source_text_from_store(stored: dict | None, meta: dict) -> str:
+    if stored:
+        base_text = (stored.get("text") or "").strip()
+        translated_text = (stored.get("translated_text") or "").strip()
+        source_type = (stored.get("source_type") or meta.get("source_type") or "").strip()
+        language = (stored.get("language") or meta.get("language") or "").strip().lower()
+        if base_text and translated_text and translated_text != base_text:
+            if language and language != "en":
+                return f"{base_text}\n\nEnglish translation:\n{translated_text}"
+            if source_type == "audio":
+                return f"{base_text}\n\nEnglish translation:\n{translated_text}"
+        if base_text:
+            return base_text
+        if translated_text:
+            return translated_text
+    return _source_text_from_metadata(meta)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
@@ -175,14 +200,18 @@ async def retrieve(
         )
         matches = [
             {
+                "id": match.id,
                 "score": match.score,
                 "metadata": match.metadata or {},
             }
             for match in results.matches
         ]
 
+    stored_chunks = fetch_chunks([str(match.get("id") or "") for match in matches]) if backend != "local" else {}
+
     chunks = []
     for match in matches:
+        match_id = str(match.get("id") or "")
         score = float(match.get("score") or 0.0)
         if score < settings.rag_min_score:
             continue
@@ -192,7 +221,7 @@ async def retrieve(
         chapter_raw = meta.get("chapter") or meta.get("sarga")
         verse_raw = meta.get("verse")
         chunks.append(SourceChunk(
-            text=_source_text_from_metadata(meta),
+            text=_source_text_from_store(stored_chunks.get(match_id), meta),
             citation=meta.get("citation", ""),
             section=section,
             chapter=int(chapter_raw) if chapter_raw is not None else None,
@@ -200,8 +229,9 @@ async def retrieve(
             score=round(score, 4),
             source_type=meta.get("source_type", "text"),
             audio_timestamp=(
-                f"{meta.get('start_time_sec', '')}s–{meta.get('end_time_sec', '')}s"
-                if meta.get("source_type") == "audio" else None
+                f"{stored_chunks.get(match_id, {}).get('start_time_sec', meta.get('start_time_sec', ''))}s–{stored_chunks.get(match_id, {}).get('end_time_sec', meta.get('end_time_sec', ''))}s"
+                if meta.get("source_type") == "audio" and (stored_chunks.get(match_id) or meta.get("start_time_sec") is not None or meta.get("end_time_sec") is not None)
+                else None
             ),
             url=meta.get("url"),
         ))

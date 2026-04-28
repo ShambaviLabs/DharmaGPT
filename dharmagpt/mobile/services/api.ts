@@ -38,6 +38,10 @@ export interface QueryResponse {
   mode: QueryMode;
   language: string;
   query_id: string;
+  llm_backend?: string;
+  llm_model?: string;
+  llm_attempted_backends?: string[];
+  llm_fallback_reason?: string;
 }
 
 export type FeedbackRating = 'up' | 'down';
@@ -50,6 +54,8 @@ export interface FeedbackRequest {
   sources: SourceChunk[];
   rating: FeedbackRating;
   note?: string;
+  llm_backend?: string;
+  llm_model?: string;
 }
 
 export interface HealthResponse {

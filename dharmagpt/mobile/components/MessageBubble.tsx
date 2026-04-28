@@ -45,6 +45,8 @@ export default function MessageBubble({ message, onFeedbackSubmit }: Props) {
         mode: message.mode ?? 'guidance',
         sources: message.sources ?? [],
         rating,
+        llm_backend: message.llm_backend,
+        llm_model: message.llm_model,
       });
     } catch {}
   };

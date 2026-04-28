@@ -52,11 +52,21 @@ def _write_records(path: Path, records: list[dict]) -> None:
 def _translation_config() -> TranslationConfig:
     return TranslationConfig(
         backend=TranslationBackend.auto,
+        sarvam_model=settings.sarvam_translation_model,
+        sarvam_api_key=settings.sarvam_api_key,
         anthropic_model=settings.anthropic_model,
         anthropic_api_key=settings.anthropic_api_key,
+        openai_model=settings.openai_translation_model,
+        openai_api_key=settings.openai_api_key,
         ollama_model=settings.ollama_model,
         ollama_url=settings.ollama_url,
         indictrans2_model=settings.indictrans2_model,
+        local_first=settings.translation_local_first,
+        backend_order=tuple(
+            item.strip()
+            for item in (settings.translation_backend_order or "").split(",")
+            if item.strip()
+        ),
     )
 
 

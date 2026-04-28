@@ -2,7 +2,6 @@ from fastapi import APIRouter
 from models.schemas import HealthResponse
 from core.config import get_settings
 from core.retrieval import get_pinecone
-from core.local_vector_store import healthcheck as local_vector_healthcheck
 import anthropic
 import httpx
 
@@ -19,8 +18,6 @@ async def health() -> HealthResponse:
     sarvam_ok = False
     active_backend = (settings.vector_db_backend or "pinecone").strip().lower()
     llm_backend = (settings.llm_backend or "anthropic").strip().lower()
-
-    local_vector_ok = local_vector_healthcheck()
 
     try:
         pc = get_pinecone()
@@ -56,8 +53,8 @@ async def health() -> HealthResponse:
     except Exception:
         pass
 
-    vector_ok = local_vector_ok if active_backend == "local" else pinecone_ok
-    vector_name = settings.local_vector_index_name if active_backend == "local" else settings.pinecone_index_name
+    vector_ok = pinecone_ok
+    vector_name = settings.pinecone_index_name
     llm_ok = ollama_ok if llm_backend == "ollama" else anthropic_ok
 
     return HealthResponse(

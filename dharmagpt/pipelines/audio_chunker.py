@@ -13,7 +13,7 @@ import uuid
 import structlog
 
 from core.config import get_settings
-from core.local_vector_store import upsert_vectors
+from core.chunk_store import upsert_chunk
 from core.retrieval import embed_texts, get_pinecone
 from core.translation import TranslationBackend, TranslationConfig, TranslationOutcome, translate_text
 
@@ -33,6 +33,7 @@ SACRED_MARKERS = [
     "bajrangbali",
 ]
 SHLOKA_PATTERN = re.compile(r"[।॥|]+")
+CHUNK_WINDOW_SECS = 30
 
 
 def _detect_speaker(text: str) -> str:
@@ -69,6 +70,58 @@ def _chunk_by_pause(words: list[dict], min_words: int = 12, max_words: int = 70)
             )
             buf = []
             start = words[i + 1].get("start", 0) if not is_last else 0
+    return chunks
+
+
+def _chunk_by_time_window(words: list[dict], window_secs: int = CHUNK_WINDOW_SECS) -> list[dict]:
+    """Group words into fixed-width time windows based on start timestamps."""
+    if not words:
+        return []
+
+    chunks: list[dict] = []
+    buf: list[dict] = []
+    bucket = None
+    window_start = 0.0
+
+    for word in words:
+        start = word.get("start")
+        end = word.get("end")
+        if not isinstance(start, (int, float)):
+            continue
+        word_bucket = int(start // window_secs)
+        if bucket is None:
+            bucket = word_bucket
+            window_start = float(bucket * window_secs)
+        if word_bucket != bucket and buf:
+            text = re.sub(r"\s+", " ", " ".join(x.get("word", "") for x in buf)).strip()
+            chunks.append(
+                {
+                    "text": text,
+                    "start": window_start,
+                    "end": buf[-1].get("end", window_start),
+                    "speaker": _detect_speaker(text),
+                    "has_shloka": bool(SHLOKA_PATTERN.search(text)),
+                    "word_count": len(buf),
+                }
+            )
+            buf = []
+            bucket = word_bucket
+            window_start = float(bucket * window_secs)
+        buf.append(word)
+
+    if buf:
+        text = re.sub(r"\s+", " ", " ".join(x.get("word", "") for x in buf)).strip()
+        chunks.append(
+            {
+                "text": text,
+                "start": window_start,
+                "end": buf[-1].get("end", window_start),
+                "speaker": _detect_speaker(text),
+                "has_shloka": bool(SHLOKA_PATTERN.search(text)),
+                "word_count": len(buf),
+            }
+        )
+
     return chunks
 
 
@@ -121,12 +174,21 @@ def _normalize_language_code(language_code: str) -> str:
 def _build_translation_config() -> TranslationConfig:
     return TranslationConfig(
         backend=TranslationBackend.auto,
+        sarvam_model=settings.sarvam_translation_model,
+        sarvam_api_key=settings.sarvam_api_key,
         anthropic_model=settings.anthropic_model,
         anthropic_api_key=settings.anthropic_api_key,
+        openai_model=settings.openai_translation_model,
+        openai_api_key=settings.openai_api_key,
         ollama_model=settings.ollama_model,
         ollama_url=settings.ollama_url,
         indictrans2_model=settings.indictrans2_model,
         local_first=settings.translation_local_first,
+        backend_order=tuple(
+            item.strip()
+            for item in (settings.translation_backend_order or "").split(",")
+            if item.strip()
+        ),
     )
 
 
@@ -141,7 +203,7 @@ def _translate_chunks_parallel(
 
     config = _build_translation_config()
     results: list[TranslationOutcome | None] = [None] * len(chunks)
-    max_workers = min(4, len(chunks))
+    max_workers = max(1, min(settings.translation_max_workers, len(chunks)))
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -200,7 +262,7 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
     words = transcript_data.get("words", [])
     raw_text = transcript_data.get("transcript", "")
 
-    raw_chunks = _chunk_by_pause(words) if words else _fallback_chunk(raw_text)
+    raw_chunks = _chunk_by_time_window(words) if words else _fallback_chunk(raw_text)
     if not raw_chunks:
         return {
             "chunks_created": 0,
@@ -219,6 +281,8 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
 
     if needs_translation:
         outcomes = _translate_chunks_parallel(raw_chunks, source_lang=source_lang, target_lang="en")
+        if not any(item is not None for item in outcomes):
+            raise RuntimeError("All translation backends failed; indexing paused for retry")
         translated_chunks = [item.text if item is not None else "" for item in outcomes]
     else:
         outcomes = [None] * len(raw_chunks)
@@ -243,63 +307,50 @@ async def chunk_and_index(transcript_data: dict, filename: str, file_metadata: d
         embedding_backend = None
 
     for i, (chunk, vec, translated, outcome) in enumerate(zip(raw_chunks, vectors, translated_chunks, outcomes)):
+        chunk_id = f"audio_{stem}_{uuid.uuid4().hex[:8]}_{i:04d}"
         record_metadata = {
             "source_type": "audio",
-            "source_file": filename,
             "source": file_metadata.get("source") or stem,
             "source_title": file_metadata.get("source_title") or file_metadata.get("description", stem),
-            "text": chunk["text"],
-            "text_preview": chunk["text"][:300],
-            "start_time_sec": chunk.get("start") or "",
-            "end_time_sec": chunk.get("end") or "",
-            "speaker_type": chunk["speaker"],
-            "has_shloka": chunk["has_shloka"],
+            "citation": f"Audio: {file_metadata.get('description', stem)}",
             "section": file_metadata.get("section") or "",
             "language": file_metadata.get("language_code", "hi-IN"),
-            "description": file_metadata.get("description", stem),
-            "citation": f"Audio: {file_metadata.get('description', stem)}",
-            "word_count": len(chunk["text"].split()),
-            "transcription_mode": file_metadata.get("transcription_mode", "sarvam_stt"),
-            "transcription_version": file_metadata.get("transcription_version", "saaras:v3"),
-            "translation_mode": provenance["translation_mode"] or "",
-            "translation_backend": provenance["translation_backend"] or "",
-            "translation_version": provenance["translation_version"] or "",
-            "translation_fallback_reason": provenance["translation_fallback_reason"] or "",
-            "translation_attempted_backends": provenance["translation_attempted_backends"] or [],
-            "embedding_backend": embedding_backend or "",
+            "start_time_sec": chunk.get("start") if chunk.get("start") is not None else "",
+            "end_time_sec": chunk.get("end") if chunk.get("end") is not None else "",
+            "speaker_type": chunk.get("speaker") or "",
+            "word_count": chunk.get("word_count") or len(chunk["text"].split()),
+            "text_preview": chunk["text"][:300],
+            "translated_text_preview": translated[:300] if translated.strip() else "",
+            "has_shloka": chunk["has_shloka"],
         }
         if dataset_id:
             record_metadata["dataset_id"] = dataset_id
-        if translated.strip():
-            record_metadata["translated_text"] = translated.strip()
-            record_metadata["translated_text_preview"] = translated[:300]
-        if outcome is not None:
-            record_metadata["translation_chunk_backend"] = outcome.backend
-            record_metadata["translation_chunk_version"] = outcome.version
+        upsert_chunk(
+            chunk_id,
+            text=chunk["text"],
+            translated_text=translated.strip(),
+            metadata=record_metadata,
+        )
         records.append(
             {
-                "id": f"audio_{stem}_{uuid.uuid4().hex[:8]}_{i:04d}",
+                "id": chunk_id,
                 "values": vec,
                 "metadata": record_metadata,
             }
         )
 
     vector_db = settings.vector_db_backend.lower()
+    if vector_db != "pinecone":
+        raise RuntimeError("Pinecone is required for vector indexing")
+
     upserted = 0
     if records:
         batch_size = 100
-        if vector_db == "local":
-            upserted = upsert_vectors(
-                index_name=settings.local_vector_index_name,
-                namespace=settings.local_vector_namespace,
-                records=records,
-            )
-        else:
-            index = get_pinecone().Index(settings.pinecone_index_name)
-            for i in range(0, len(records), batch_size):
-                batch = records[i : i + batch_size]
-                index.upsert(vectors=batch)
-                upserted += len(batch)
+        index = get_pinecone().Index(settings.pinecone_index_name)
+        for i in range(0, len(records), batch_size):
+            batch = records[i : i + batch_size]
+            index.upsert(vectors=batch)
+            upserted += len(batch)
 
     translated_transcript = "\n".join(piece for piece in translated_chunks if piece.strip()) if needs_translation else None
     log.info(

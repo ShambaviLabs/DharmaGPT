@@ -9,6 +9,8 @@ export interface Message {
   sources?: SourceChunk[];
   query_id?: string;
   mode?: QueryMode;
+  llm_backend?: string;
+  llm_model?: string;
   feedback?: 'up' | 'down';
   timestamp: number;
 }

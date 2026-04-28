@@ -13,10 +13,12 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from core import dataset_store
+from core.chunk_store import upsert_chunk
 from api.auth import require_admin_api_key
 from core.config import get_settings
-from core.local_vector_store import upsert_vectors
+from core.insight_store import record_ingestion_run
 from core.retrieval import embed_texts, get_pinecone
+from core.usage_stats import summarize_usage
 
 router = APIRouter()
 settings = get_settings()
@@ -129,10 +131,90 @@ def _append_upload_audit(record: dict) -> None:
     fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _iter_audit_records(path: Path) -> list[dict]:
+  if not path.exists():
+    return []
+  rows: list[dict] = []
+  with path.open(encoding="utf-8") as fh:
+    for line in fh:
+      raw = line.strip()
+      if not raw:
+        continue
+      try:
+        obj = json.loads(raw)
+      except json.JSONDecodeError:
+        continue
+      if isinstance(obj, dict):
+        rows.append(obj)
+  return rows
+
+
+def _aggregate_indexed_sources(limit: int = 300) -> list[dict]:
+  corpus_rows = _iter_audit_records(AUDIT_DIR / "corpus_uploads.jsonl")
+  audio_rows = _iter_audit_records(AUDIT_DIR / "audio_uploads.jsonl")
+
+  grouped: dict[str, dict] = {}
+
+  def _upsert(entry: dict) -> None:
+    source = str(entry.get("source") or "").strip()
+    source_title = str(entry.get("source_title") or source or "Untitled source").strip()
+    source_type = str(entry.get("source_type") or "audio").strip()
+    key = f"{source or source_title}::{source_type}"
+
+    agg = grouped.get(key)
+    if agg is None:
+      agg = {
+        "source": source,
+        "source_title": source_title,
+        "source_type": source_type,
+        "language": str(entry.get("language") or entry.get("language_code") or "").strip(),
+        "vector_db": str(entry.get("vector_db") or "").strip(),
+        "index_name": str(entry.get("index_name") or "").strip(),
+        "namespace": str(entry.get("namespace") or "").strip(),
+        "uploads": 0,
+        "chunks_total": 0,
+        "vectors_total": 0,
+        "last_uploaded_at": "",
+        "last_file": "",
+      }
+      grouped[key] = agg
+
+    agg["uploads"] += 1
+    agg["chunks_total"] += int(entry.get("chunks_created") or 0)
+    agg["vectors_total"] += int(entry.get("vectors_upserted") or 0)
+
+    ts = str(entry.get("timestamp") or "")
+    if ts and (not agg["last_uploaded_at"] or ts > agg["last_uploaded_at"]):
+      agg["last_uploaded_at"] = ts
+      agg["last_file"] = str(
+        entry.get("original_filename")
+        or entry.get("document")
+        or entry.get("source_file")
+        or ""
+      )
+
+  for row in corpus_rows:
+    _upsert({
+      **row,
+      "source_type": row.get("source_type") or "text",
+    })
+
+  for row in audio_rows:
+    _upsert({
+      **row,
+      "source_type": row.get("source_type") or "audio",
+      "language": row.get("language") or row.get("language_code") or "",
+      "index_name": row.get("index_name") or settings.pinecone_index_name,
+    })
+
+  items = sorted(grouped.values(), key=lambda x: x.get("last_uploaded_at") or "", reverse=True)
+  return items[:limit]
+
+
 @router.post("/admin/vector/upload")
 async def upload_document_to_vector_db(
   file: UploadFile = File(...),
-  vector_db: str = Form("local"),
+  vector_db: str = Form("pinecone"),
   index_name: str = Form(""),
   namespace: str = Form(""),
   dataset_name: str = Form(""),
@@ -146,9 +228,9 @@ async def upload_document_to_vector_db(
   url: str = Form(""),
   _: None = Depends(require_admin_api_key),
 ) -> dict:
-  vector_db = (vector_db or "local").strip().lower()
-  if vector_db not in {"local", "pinecone"}:
-    raise HTTPException(status_code=400, detail="vector_db must be 'local' or 'pinecone'")
+  vector_db = (vector_db or "pinecone").strip().lower()
+  if vector_db != "pinecone":
+    raise HTTPException(status_code=400, detail="vector_db must be 'pinecone'")
 
   filename = file.filename or "upload.txt"
   raw = await file.read()
@@ -161,12 +243,8 @@ async def upload_document_to_vector_db(
   if not chunks:
     raise HTTPException(status_code=400, detail="Could not extract usable text from uploaded file")
 
-  if vector_db == "local":
-    default_index = settings.local_vector_index_name
-    default_namespace = settings.local_vector_namespace
-  else:
-    default_index = settings.pinecone_index_name
-    default_namespace = ""
+  default_index = settings.pinecone_index_name
+  default_namespace = ""
 
   target_index = (index_name or default_index).strip()
   if not target_index:
@@ -189,53 +267,63 @@ async def upload_document_to_vector_db(
   resolved_source = (source or re.sub(r"[^a-z0-9]+", "_", resolved_title.lower()).strip("_") or doc_id).strip()
   now = datetime.now(timezone.utc).isoformat()
   for i, (chunk, vec) in enumerate(zip(chunks, vectors), start=1):
+    chunk_id = f"admin-doc-{doc_id}-{i}"
     meta = {
-      "text": chunk,
       "source_type": (source_type or "text").strip(),
       "citation": resolved_title,
       "source": resolved_source,
       "source_title": resolved_title,
-      "document_name": filename,
-      "source_file": filename,
-      "source_file_path": source_file_path,
-      "content_sha256": content_sha256,
       "language": (language or "en").strip(),
       "section": (section or "").strip(),
       "author": (author or "").strip(),
       "translator": (translator or "").strip(),
       "url": (url or "").strip(),
-      "upload_timestamp": now,
-      "chunk_index": i,
-      "chunk_count": len(chunks),
+      "text_preview": chunk[:500],
     }
     if ds_id:
       meta["dataset_id"] = ds_id
-    records.append({"id": f"admin-doc-{doc_id}-{i}", "values": vec, "metadata": meta})
+    upsert_chunk(chunk_id, text=chunk, metadata=meta)
+    records.append({"id": chunk_id, "values": vec, "metadata": meta})
 
   batch_size = 50
   upserted = 0
-  if vector_db == "local":
-    upserted = upsert_vectors(
-      index_name=target_index,
-      namespace=target_namespace,
-      records=records,
-    )
-  else:
-    pc = get_pinecone()
-    index = pc.Index(target_index)
-    for i in range(0, len(records), batch_size):
-      batch = records[i : i + batch_size]
-      if target_namespace:
-        index.upsert(vectors=batch, namespace=target_namespace)
-      else:
-        index.upsert(vectors=batch)
-      upserted += len(batch)
+  pc = get_pinecone()
+  index = pc.Index(target_index)
+  for i in range(0, len(records), batch_size):
+    batch = records[i : i + batch_size]
+    if target_namespace:
+      index.upsert(vectors=batch, namespace=target_namespace)
+    else:
+      index.upsert(vectors=batch)
+    upserted += len(batch)
 
   if ds_id:
     dataset_store.increment_count(ds_id, upserted)
 
+  run_id = record_ingestion_run(
+    kind=(source_type or "text").strip(),
+    source=resolved_source,
+    source_title=resolved_title,
+    file_name=filename,
+    language=(language or "en").strip(),
+    dataset_id=ds_id,
+    status="ok",
+    chunks=len(chunks),
+    vectors=upserted,
+    vector_db=vector_db,
+    embedding_backend=embedding_backend,
+    metadata={
+      "index_name": target_index,
+      "namespace": target_namespace,
+      "source_file_path": source_file_path,
+      "content_sha256": content_sha256,
+    },
+    finished_at=now,
+  )
+
   _append_upload_audit({
     "timestamp": now,
+    "run_id": run_id,
     "role": "indexed_source",
     "file_path": source_file_path,
     "original_filename": filename,
@@ -393,13 +481,12 @@ def _feedback_page() -> str:
       <div class="field" style="min-width: 180px;">
         <label for="vectorDb">Vector DB</label>
         <select id="vectorDb" style="border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); padding: 10px 14px;">
-          <option value="local" selected>Local (Beta)</option>
-          <option value="pinecone">Pinecone (Later)</option>
+          <option value="pinecone" selected>Pinecone</option>
         </select>
       </div>
       <div class="field" style="min-width: 220px;">
         <label for="indexName">Index Name</label>
-        <input id="indexName" type="text" placeholder="dharma-local" />
+        <input id="indexName" type="text" placeholder="dharma-gpt" />
       </div>
       <div class="field" style="min-width: 180px;">
         <label for="namespace">Namespace</label>
@@ -659,7 +746,7 @@ def _feedback_page() -> str:
 
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("vector_db", document.getElementById("vectorDb").value || "local");
+      fd.append("vector_db", document.getElementById("vectorDb").value || "pinecone");
       fd.append("index_name", document.getElementById("indexName").value || "");
       fd.append("namespace", document.getElementById("namespace").value || "");
       fd.append("source_title", document.getElementById("sourceTitle").value || "");
@@ -790,6 +877,18 @@ async def delete_dataset(name: str, purge_vectors: bool = False, _: None = Depen
     return {"deleted": name, "vectors_purged": purge_vectors}
 
 
+@router.get("/admin/sources")
+async def list_indexed_sources(limit: int = 300, _: None = Depends(require_admin_api_key)) -> dict:
+    safe_limit = max(1, min(limit, 1000))
+    return {"sources": _aggregate_indexed_sources(limit=safe_limit)}
+
+
+@router.get("/admin/usage-stats")
+async def usage_stats(limit: int = 50, _: None = Depends(require_admin_api_key)) -> dict:
+    safe_limit = max(1, min(limit, 500))
+    return summarize_usage(limit=safe_limit)
+
+
 # ── Main admin dashboard ───────────────────────────────────────────────────────
 
 def _admin_page() -> str:
@@ -838,6 +937,12 @@ def _admin_page() -> str:
     .source-chip{font-size:11px;padding:4px 8px;border-radius:8px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.25);color:#93c5fd;display:inline-block;margin:3px 3px 3px 0}
     .score{font-size:11px;color:var(--muted)}
     .section-title{font-size:16px;font-weight:600;margin-bottom:14px}
+    .metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px}
+    .metric{background:rgba(2,6,23,.35);border:1px solid var(--line);border-radius:12px;padding:14px}
+    .metric-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+    .metric-value{font-size:24px;font-weight:700;margin-top:4px}
+    .mini-list{display:grid;gap:8px}
+    .mini-item{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(148,163,184,.12);padding-bottom:7px;font-size:13px}
     .divider{border:0;border-top:1px solid var(--line);margin:20px 0}
     @media(max-width:520px){
       .shell{padding:24px 14px}
@@ -860,6 +965,8 @@ def _admin_page() -> str:
   </div>
   <div class="tabs">
     <button class="tab active" onclick="showTab('datasets')">Datasets</button>
+    <button class="tab" onclick="showTab('sources')">Sources</button>
+    <button class="tab" onclick="showTab('stats')">Stats</button>
     <button class="tab" onclick="showTab('upload')">Upload</button>
     <button class="tab" onclick="showTab('test')">Test Query</button>
     <button class="tab" onclick="showTab('gold')">Gold Store</button>
@@ -876,6 +983,35 @@ def _admin_page() -> str:
       <div class="notice" id="ds-notice"></div>
     </div>
     <div class="notice" style="font-size:12px;color:var(--muted)">Disabled datasets are excluded from all queries. Deleting with "Purge vectors" removes them from Pinecone permanently.</div>
+  </div>
+
+  <!-- ── SOURCES ── -->
+  <div class="pane" id="pane-sources">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="section-title" style="margin:0">Indexed Sources</div>
+        <button class="btn-ghost btn-sm" onclick="loadSources()">Refresh</button>
+      </div>
+      <div id="sources-table"><div class="empty">Loading…</div></div>
+      <div class="notice" id="src-notice"></div>
+    </div>
+    <div class="notice" style="font-size:12px;color:var(--muted)">Shows source titles from document/audio indexing audit logs.</div>
+  </div>
+
+  <!-- ── STATS ── -->
+  <div class="pane" id="pane-stats">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="section-title" style="margin:0">Ingestion Insights</div>
+        <button class="btn-ghost btn-sm" onclick="loadStats()">Refresh</button>
+      </div>
+      <div id="stats-summary"><div class="empty">Loading…</div></div>
+      <div class="notice" id="stats-notice"></div>
+    </div>
+    <div class="card">
+      <div class="section-title">Latest Runs</div>
+      <div id="stats-runs"><div class="empty">No runs loaded.</div></div>
+    </div>
   </div>
 
   <!-- ── UPLOAD ── -->
@@ -911,8 +1047,7 @@ def _admin_page() -> str:
         <div><label>Dataset Name</label><input id="doc-dataset" type="text" placeholder="e.g. seed-corpus"/></div>
         <div><label>Vector DB</label>
           <select id="doc-db">
-            <option value="pinecone">Pinecone</option>
-            <option value="local">Local (SQLite)</option>
+            <option value="pinecone" selected>Pinecone</option>
           </select>
         </div>
       </div>
@@ -989,12 +1124,14 @@ function adminHeaders(extra={}) {
 // ── Tab switching ──────────────────────────────────────────────────────────────
 function showTab(name) {
   document.querySelectorAll(".tab").forEach((t,i)=>{
-    const names=["datasets","upload","test","gold"];
+    const names=["datasets","sources","stats","upload","test","gold"];
     t.classList.toggle("active", names[i]===name);
   });
   document.querySelectorAll(".pane").forEach(p => p.classList.remove("active"));
   document.getElementById("pane-"+name).classList.add("active");
   if(name==="datasets") loadDatasets();
+  if(name==="sources") loadSources();
+  if(name==="stats") loadStats();
   if(name==="gold") loadGold();
 }
 
@@ -1037,6 +1174,101 @@ function renderDatasets(datasets) {
   }
   html+='</tbody></table>';
   el.innerHTML=html;
+}
+
+// ── Sources ───────────────────────────────────────────────────────────────────
+async function loadSources() {
+  try {
+    const r = await fetch("/admin/sources?limit=300", {headers: adminHeaders()});
+    const d = await r.json();
+    renderSources(d.sources || []);
+    setNotice("src-notice", `Loaded ${(d.sources || []).length} source(s).`);
+  } catch(e) { setNotice("src-notice","Load failed: "+e.message,true); }
+}
+
+function renderSources(sources) {
+  const el = document.getElementById("sources-table");
+  if(!sources.length){
+    el.innerHTML='<div class="empty">No indexed sources found yet.</div>';
+    return;
+  }
+  let html='<table><thead><tr><th>Source</th><th>Type</th><th>Language</th><th>Uploads</th><th>Vectors</th><th>Last Upload</th></tr></thead><tbody>';
+  for(const s of sources){
+    const ts = s.last_uploaded_at ? new Date(s.last_uploaded_at).toLocaleString() : "-";
+    const subtitle = s.source ? s.source : "-";
+    html+=`<tr>
+      <td><strong>${esc(s.source_title || "Untitled source")}</strong><br/><span style="font-size:11px;color:var(--muted)">${esc(subtitle)}</span></td>
+      <td>${esc(s.source_type || "-")}</td>
+      <td>${esc(s.language || "-")}</td>
+      <td>${s.uploads || 0}</td>
+      <td>${s.vectors_total || 0}<br/><span style="font-size:11px;color:var(--muted)">${s.chunks_total || 0} chunks</span></td>
+      <td>${ts}<br/><span style="font-size:11px;color:var(--muted)">${esc(s.last_file || "")}</span></td>
+    </tr>`;
+  }
+  html+='</tbody></table>';
+  el.innerHTML=html;
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const r = await fetch("/admin/usage-stats?limit=50", {headers: adminHeaders()});
+    const d = await r.json();
+    renderStats(d);
+    setNotice("stats-notice", "Loaded ingestion insights.");
+  } catch(e) { setNotice("stats-notice","Load failed: "+e.message,true); }
+}
+
+function miniList(items) {
+  if(!items || !items.length) return '<div class="empty" style="padding:16px">No data yet.</div>';
+  return '<div class="mini-list">' + items.map(x =>
+    `<div class="mini-item"><span>${esc(x.name || x.date || "-")}</span><strong>${esc(x.count || x.vectors || 0)}</strong></div>`
+  ).join("") + '</div>';
+}
+
+function renderStats(d) {
+  const totals = d.totals || {};
+  const usage = d.usage || {};
+  document.getElementById("stats-summary").innerHTML = `
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Runs</div><div class="metric-value">${totals.runs || 0}</div></div>
+      <div class="metric"><div class="metric-label">Queries</div><div class="metric-value">${totals.query_runs || 0}</div></div>
+      <div class="metric"><div class="metric-label">Audio Runs</div><div class="metric-value">${totals.audio_runs || 0}</div></div>
+      <div class="metric"><div class="metric-label">Chunks</div><div class="metric-value">${totals.chunks || 0}</div></div>
+      <div class="metric"><div class="metric-label">Vectors</div><div class="metric-value">${totals.vectors || 0}</div></div>
+    </div>
+    <div class="row two">
+      <div><div class="section-title">STT Models</div>${miniList(usage.transcription)}</div>
+      <div><div class="section-title">Translation Models</div>${miniList(usage.translation)}</div>
+      <div><div class="section-title">Embeddings</div>${miniList(usage.embedding)}</div>
+      <div><div class="section-title">Vector DB</div>${miniList(usage.vector_db)}</div>
+      <div><div class="section-title">Answer Models</div>${miniList(usage.query_models)}</div>
+      <div><div class="section-title">Ratings by Model</div>${miniList(usage.query_ratings)}</div>
+    </div>`;
+
+  const rows = d.latest || [];
+  if(!rows.length){
+    document.getElementById("stats-runs").innerHTML = '<div class="empty">No ingestion runs yet.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>When</th><th>Source</th><th>Status</th><th>Models</th><th>Vectors</th></tr></thead><tbody>';
+  for(const r of rows){
+    const ts = r.timestamp ? new Date(r.timestamp).toLocaleString() : "-";
+    const models = [
+      r.transcription_mode ? "STT: " + r.transcription_mode + " / " + (r.transcription_version || "-") : "",
+      r.translation_backend ? "TR: " + r.translation_backend + " / " + (r.translation_version || "-") : "",
+      r.embedding_backend ? "EMB: " + r.embedding_backend : ""
+    ].filter(Boolean).join("<br/>");
+    html += `<tr>
+      <td>${ts}</td>
+      <td><strong>${esc(r.source_title || r.source || r.file || "-")}</strong><br/><span style="font-size:11px;color:var(--muted)">${esc(r.kind || "")}</span></td>
+      <td><span class="badge ${r.status==="ok"?"on":"off"}">${esc(r.status || "unknown")}</span></td>
+      <td style="font-size:12px">${models || "-"}</td>
+      <td>${r.vectors || 0}<br/><span style="font-size:11px;color:var(--muted)">${r.chunks || 0} chunks</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById("stats-runs").innerHTML = html;
 }
 
 async function toggleDs(name, active) {
@@ -1197,6 +1429,7 @@ async function reviewGold(qid, status){
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadDatasets();
+loadSources();
 </script>
 </body>
 </html>"""

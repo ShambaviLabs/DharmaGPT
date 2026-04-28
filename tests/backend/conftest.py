@@ -10,6 +10,11 @@ if str(DHARMAGPT_DIR) not in sys.path:
     sys.path.insert(0, str(DHARMAGPT_DIR))
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "smoke: fast application startup and route availability checks")
+    config.addinivalue_line("markers", "contract: API route, response-shape, and auth-boundary contract checks")
+
+
 @pytest.fixture(autouse=True)
 def isolated_local_stores(tmp_path, monkeypatch):
     """Keep backend tests independent from the live dev database."""

@@ -132,6 +132,7 @@ def upload_chunk(
     language_code: str,
     description: str,
     api_url: str,
+    admin_api_key: str | None,
     timeout: int,
     retries: int,
     retry_delay: float,
@@ -147,12 +148,14 @@ def upload_chunk(
         ".wma": "audio/x-ms-wma",
     }
     mime = mime_map.get(chunk_path.suffix.lower(), "audio/mpeg")
+    headers = {"X-API-Key": admin_api_key} if admin_api_key else None
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
             with chunk_path.open("rb") as fh:
                 resp = requests.post(
                     api_url,
+                    headers=headers,
                     files={"file": (chunk_path.name, fh, mime)},
                     data={"language_code": language_code, "description": description},
                     timeout=timeout,
@@ -181,6 +184,16 @@ def main() -> None:
     parser.add_argument("--language-code", default="te-IN", help="Sarvam language code for transcription")
     parser.add_argument("--language-tag", default="te", help="Short language tag used in filenames")
     parser.add_argument("--api-url", default="http://localhost:8000/api/v1/audio/transcribe", help="Local transcription API URL")
+    parser.add_argument(
+        "--admin-api-key",
+        default=(
+            os.getenv("ADMIN_API_KEY")
+            or os.getenv("ADMIN_OPERATOR_API_KEY")
+            or os.getenv("STAGING_API_KEY")
+            or ""
+        ),
+        help="Admin key for protected API routes (defaults to ADMIN_API_KEY / ADMIN_OPERATOR_API_KEY / STAGING_API_KEY)",
+    )
     parser.add_argument("--timeout", type=int, default=1800, help="Upload timeout per chunk in seconds")
     parser.add_argument("--retries", type=int, default=3, help="Retry count for transient upload failures")
     parser.add_argument("--retry-delay", type=float, default=5.0, help="Base delay between retries in seconds")
@@ -195,6 +208,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     language_tag = normalize_language_tag(args.language_tag)
+    admin_api_key = (args.admin_api_key or "").strip()
     files = discover_audio_files(input_dir, recursive=args.recursive)
     if not files:
         raise SystemExit(f"No supported audio files found in {input_dir}")
@@ -209,6 +223,7 @@ def main() -> None:
     print(f"Output: {output_dir}")
     print(f"Chunk:  {args.segment_seconds}s")
     print(f"API:    {args.api_url}\n")
+    print(f"Auth:   {'enabled' if admin_api_key else 'disabled'}\n")
 
     for index, source in enumerate(files, start=1):
         source_slug = slugify(source.stem, default="audio")
@@ -257,6 +272,7 @@ def main() -> None:
                     language_code=args.language_code,
                     description=description,
                     api_url=args.api_url,
+                    admin_api_key=admin_api_key,
                     timeout=args.timeout,
                     retries=args.retries,
                     retry_delay=args.retry_delay,
