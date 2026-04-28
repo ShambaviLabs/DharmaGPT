@@ -213,27 +213,29 @@ async def test_failed_segment_is_skipped_others_succeed():
     assert result_data["transcript"] == "good text"
 
 
-# ── audio_chunker backend routing ─────────────────────────────────────────────
+# ── audio_chunker Pinecone indexing ───────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_chunker_routes_to_local_when_backend_is_local(monkeypatch):
-    """chunk_and_index upserts to local SQLite when VECTOR_DB_BACKEND=local."""
+async def test_chunker_routes_to_pinecone(monkeypatch):
+    """chunk_and_index upserts vectors to Pinecone."""
     from core.config import get_settings
     settings = get_settings()
-    monkeypatch.setattr(settings, "vector_db_backend", "local")
+    monkeypatch.setattr(settings, "rag_backend", "pinecone")
+    monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
     monkeypatch.setattr(settings, "openai_api_key", "fake-key")
 
     upserted = []
 
-    def fake_upsert(index_name, namespace, records):
-        upserted.extend(records)
-        return len(records)
+    mock_index = MagicMock()
+    mock_index.upsert.side_effect = lambda vectors: upserted.extend(vectors)
+    mock_pc = MagicMock()
+    mock_pc.Index.return_value = mock_index
 
     async def fake_embed_texts(texts):
         return [[0.1] * 10 for _ in texts], "test"
 
     with patch("pipelines.audio_chunker.embed_texts", side_effect=fake_embed_texts), \
-         patch("pipelines.audio_chunker.upsert_vectors", side_effect=fake_upsert):
+         patch("pipelines.audio_chunker.get_pinecone", return_value=mock_pc):
 
         from pipelines.audio_chunker import chunk_and_index
         transcript_data = {
@@ -256,23 +258,25 @@ async def test_chunker_routes_to_local_when_backend_is_local(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chunker_stamps_dataset_id_on_metadata(monkeypatch):
-    """Every chunk must carry dataset_id in its Pinecone/local metadata."""
+    """Every chunk must carry dataset_id in its Pinecone metadata."""
     from core.config import get_settings
     settings = get_settings()
-    monkeypatch.setattr(settings, "vector_db_backend", "local")
+    monkeypatch.setattr(settings, "rag_backend", "pinecone")
+    monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
     monkeypatch.setattr(settings, "openai_api_key", "fake-key")
 
     stored_records = []
 
-    def capture_upsert(index_name, namespace, records):
-        stored_records.extend(records)
-        return len(records)
+    mock_index = MagicMock()
+    mock_index.upsert.side_effect = lambda vectors: stored_records.extend(vectors)
+    mock_pc = MagicMock()
+    mock_pc.Index.return_value = mock_index
 
     async def fake_embed_texts(texts):
         return [[0.0] * 10 for _ in texts], "test"
 
     with patch("pipelines.audio_chunker.embed_texts", side_effect=fake_embed_texts), \
-         patch("pipelines.audio_chunker.upsert_vectors", side_effect=capture_upsert):
+         patch("pipelines.audio_chunker.get_pinecone", return_value=mock_pc):
 
         from pipelines.audio_chunker import chunk_and_index
         await chunk_and_index(
@@ -298,19 +302,8 @@ async def test_retrieval_returns_empty_when_all_datasets_disabled(monkeypatch, t
     monkeypatch.setattr(retrieval_mod, "any_registered", tmp_db.any_registered)
     monkeypatch.setattr(retrieval_mod, "get_active_names", tmp_db.get_active_names)
 
-    from core.config import get_settings
-    settings = get_settings()
-    monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
-    monkeypatch.setattr(settings, "openai_api_key", "fake")
-
-    fake_embed_resp = MagicMock()
-    fake_embed_resp.data = [MagicMock(embedding=[0.1] * 10)]
-
-    with patch("core.retrieval.get_openai") as mock_get_openai:
-        mock_client = MagicMock()
-        mock_client.embeddings.create = AsyncMock(return_value=fake_embed_resp)
-        mock_get_openai.return_value = mock_client
-
+    # Early-exit happens before embed_query is called — assert it is never reached
+    with patch("core.retrieval.embed_query", new=AsyncMock(side_effect=AssertionError("embed_query called"))):
         from core.retrieval import retrieve
         results = await retrieve("What is dharma?")
 
@@ -326,26 +319,18 @@ async def test_retrieval_no_dataset_filter_when_none_registered(monkeypatch, tmp
 
     from core.config import get_settings
     settings = get_settings()
+    monkeypatch.setattr(settings, "rag_backend", "pinecone")
     monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
     monkeypatch.setattr(settings, "openai_api_key", "fake")
     monkeypatch.setattr(settings, "rag_min_score", 0.0)
 
-    fake_embed_resp = MagicMock()
-    fake_embed_resp.data = [MagicMock(embedding=[0.1] * 10)]
-
     pinecone_result = MagicMock()
     pinecone_result.matches = []
-
     mock_index = MagicMock()
     mock_index.query.return_value = pinecone_result
 
-    with patch("core.retrieval.get_openai") as mock_get_openai, \
+    with patch("core.retrieval.embed_query", new=AsyncMock(return_value=[0.1] * 10)), \
          patch("core.retrieval.get_pinecone") as mock_get_pc:
-
-        mock_client = MagicMock()
-        mock_client.embeddings.create = AsyncMock(return_value=fake_embed_resp)
-        mock_get_openai.return_value = mock_client
-
         mock_pc = MagicMock()
         mock_pc.Index.return_value = mock_index
         mock_get_pc.return_value = mock_pc

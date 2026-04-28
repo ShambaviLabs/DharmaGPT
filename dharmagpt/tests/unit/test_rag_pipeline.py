@@ -8,8 +8,9 @@ query-time RAG path.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from core.retrieval import _source_text_from_metadata
-from core.translation import TranslationBackend, TranslationConfig, TranslationOutcome
 from scripts.ingest_to_pinecone import build_embed_text, build_metadata
 from scripts.translate_corpus import _translate_record
 
@@ -77,31 +78,26 @@ def test_build_metadata_carries_full_text_and_translation():
 
 
 def test_translate_record_sets_compatibility_fields(monkeypatch):
-    outcome = TranslationOutcome(
+    """translate_corpus._translate_record writes text_en and text_en_model via get_translator."""
+    from core.backends.translation import TranslationResult
+    from scripts.translate_corpus import _translate_record
+
+    fake_result = TranslationResult(
         text="English translation",
-        requested_mode=TranslationBackend.auto.value,
-        backend=TranslationBackend.anthropic.value,
-        version="claude-test",
+        backend="sarvam",
         source_lang="te",
         target_lang="en",
-        attempted_backends=("anthropic",),
-        fallback_reason=None,
     )
 
-    monkeypatch.setattr(
-        "scripts.translate_corpus.translate_text",
-        lambda *args, **kwargs: outcome,
-    )
+    fake_translator = MagicMock()
+    fake_translator.translate.return_value = fake_result
 
-    record, changed = _translate_record(
-        {"text": "మూల పాఠ్యం", "language": "te"},
-        config=TranslationConfig(backend=TranslationBackend.auto),
-        force=False,
-    )
+    monkeypatch.setattr("scripts.translate_corpus.get_translator", lambda: fake_translator)
+
+    record, changed = _translate_record({"text": "మూల పాఠ్యం", "language": "te"}, force=False)
 
     assert changed is True
     assert record["text_en_model"] == "English translation"
     assert record["text_en"] == "English translation"
-    assert record["translation_backend"] == "anthropic"
-    assert record["translation_version"] == "claude-test"
+    assert record["translation_backend"] == "sarvam"
 

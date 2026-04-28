@@ -41,6 +41,10 @@ class QueryResponse(BaseModel):
     mode: QueryMode
     language: str
     query_id: str
+    llm_backend: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_attempted_backends: list[str] = Field(default_factory=list)
+    llm_fallback_reason: Optional[str] = None
 
 
 class AudioTranscribeRequest(BaseModel):
@@ -76,6 +80,8 @@ class FeedbackRequest(BaseModel):
     sources: list[SourceChunk] = Field(default_factory=list)
     rating: FeedbackRating = FeedbackRating.up
     note: Optional[str] = None
+    llm_backend: Optional[str] = None
+    llm_model: Optional[str] = None
 
 
 class CorpusUploadResponse(BaseModel):

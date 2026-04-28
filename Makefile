@@ -2,6 +2,11 @@ PYTHON ?= .venv/bin/python
 PYTEST ?= $(PYTHON) -m pytest
 PYTHONPATH_SET := PYTHONPATH=.
 PYTEST_INTEGRATION_ARGS ?=
+AUDIO_INPUT_DIR ?= knowledge/uploads/audio_sources
+AUDIO_OUTPUT_DIR ?= downloads/clips_29s_full
+AUDIO_LANGUAGE_CODE ?= hi-IN
+AUDIO_LANGUAGE_TAG ?= hi
+AUDIO_API_URL ?= http://127.0.0.1:8000/api/v1/audio/transcribe
 
 # ─── Test build steps ─────────────────────────────────────────────────────────
 
@@ -51,6 +56,17 @@ ingest:
 ## Full data pipeline: normalize → translate → ingest
 .PHONY: pipeline
 pipeline: normalize translate ingest
+
+## Transcribe audio files and upsert vector chunks via API
+.PHONY: audio-vectorize
+audio-vectorize:
+	cd dharmagpt && $(PYTHONPATH_SET) $(PYTHON) scripts/transcribe_audio_batch.py \
+		--input-dir $(AUDIO_INPUT_DIR) \
+		--output-dir $(AUDIO_OUTPUT_DIR) \
+		--language-code $(AUDIO_LANGUAGE_CODE) \
+		--language-tag $(AUDIO_LANGUAGE_TAG) \
+		--api-url $(AUDIO_API_URL) \
+		--recursive
 
 # ─── Dev server ───────────────────────────────────────────────────────────────
 

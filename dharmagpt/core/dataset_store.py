@@ -35,7 +35,47 @@ def _init(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notifications (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            level      TEXT NOT NULL DEFAULT 'error',
+            event      TEXT NOT NULL,
+            detail     TEXT,
+            file_name  TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
+
+
+# ── Notification API ──────────────────────────────────────────────────────────
+
+def push_notification(event: str, detail: str = "", file_name: str = "", level: str = "error") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO notifications (level, event, detail, file_name, created_at) VALUES (?, ?, ?, ?, ?)",
+            (level, event, detail[:2000], file_name[:500], now),
+        )
+        conn.commit()
+
+
+def list_notifications(limit: int = 50) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, level, event, detail, file_name, created_at FROM notifications ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_notifications() -> int:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM notifications")
+        conn.commit()
+        return cur.rowcount
 
 
 def register(name: str, display_name: str = "") -> None:

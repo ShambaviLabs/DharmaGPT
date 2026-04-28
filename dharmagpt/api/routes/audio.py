@@ -15,7 +15,9 @@ from api.auth import require_admin_api_key
 from models.schemas import AudioTranscribeResponse
 from core import dataset_store
 from core.config import get_settings
+from core.insight_store import record_ingestion_run
 from pipelines.audio_chunker import chunk_and_index
+from core.translation import reset_translation_provider_state
 from utils.naming import canonical_jsonl_filename, normalize_language_tag, part_number_from_filename, source_stem_from_audio_filename
 
 router = APIRouter()
@@ -91,6 +93,9 @@ def _append_audio_audit(record: dict) -> None:
 
 # ── STT backends ──────────────────────────────────────────────────────────────
 
+SARVAM_TRANSLATE_URL = "https://api.sarvam.ai/speech-to-text-translate"
+
+
 async def _transcribe_with_sarvam(audio_bytes: bytes, filename: str, language_code: str, suffix: str) -> dict:
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
@@ -101,6 +106,67 @@ async def _transcribe_with_sarvam(audio_bytes: bytes, filename: str, language_co
         )
         response.raise_for_status()
         return response.json()
+
+
+async def _translate_with_sarvam(audio_bytes: bytes, filename: str, suffix: str) -> str | None:
+    """Call Sarvam speech-to-text-translate to get English directly from audio."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(
+            SARVAM_TRANSLATE_URL,
+            headers={"api-subscription-key": settings.sarvam_api_key},
+            files={"file": (filename, audio_bytes, _MIME_MAP.get(suffix, "audio/mpeg"))},
+            data={"model": "saaras:v2.5"},
+        )
+        response.raise_for_status()
+        data = response.json()
+    return (data.get("transcript") or "").strip() or None
+
+
+async def _sarvam_stt_and_translate_parallel(
+    audio_bytes: bytes,
+    filename: str,
+    language_code: str,
+    suffix: str,
+) -> tuple[dict, str | None]:
+    """Fire Sarvam STT (Telugu + timestamps) and Sarvam Translate (English) in parallel.
+
+    Returns (stt_result, english_text_or_None).
+    Failures are logged as notifications; the pipeline continues with whatever succeeded.
+    """
+    from core.dataset_store import push_notification
+
+    stt_task = asyncio.create_task(_transcribe_with_sarvam(audio_bytes, filename, language_code, suffix))
+    translate_task = asyncio.create_task(_translate_with_sarvam(audio_bytes, filename, suffix))
+
+    stt_result, translate_result = await asyncio.gather(stt_task, translate_task, return_exceptions=True)
+
+    # Handle STT failure
+    if isinstance(stt_result, Exception):
+        push_notification(
+            event="sarvam_stt_failed",
+            detail=str(stt_result),
+            file_name=filename,
+            level="error",
+        )
+        log.error("sarvam_stt_failed", file=filename, error=str(stt_result))
+        raise stt_result  # STT is required — re-raise so caller can fall back
+
+    # Handle translate failure (non-fatal — pipeline continues without English)
+    en_text: str | None = None
+    if isinstance(translate_result, Exception):
+        push_notification(
+            event="sarvam_translate_failed",
+            detail=str(translate_result),
+            file_name=filename,
+            level="warning",
+        )
+        log.warning("sarvam_translate_failed", file=filename, error=str(translate_result))
+    else:
+        en_text = translate_result
+        if en_text:
+            log.info("sarvam_translate_ok", file=filename, chars=len(en_text))
+
+    return stt_result, en_text
 
 
 async def _transcribe_with_claude(audio_bytes: bytes, filename: str, language_code: str, suffix: str) -> dict:
@@ -143,89 +209,23 @@ async def _transcribe_with_claude(audio_bytes: bytes, filename: str, language_co
     return {"transcript": transcript, "words": []}
 
 
-_indicwhisper_pipeline_cache: dict = {}
-
-def _transcribe_with_indicwhisper(audio_bytes: bytes, filename: str, language_code: str, suffix: str) -> dict:
-    from transformers import pipeline as hf_pipeline
-
-    model_name = settings.indicwhisper_model
-    if model_name not in _indicwhisper_pipeline_cache:
-        log.info("indicwhisper_loading_model", model=model_name)
-        _indicwhisper_pipeline_cache[model_name] = hf_pipeline(
-            "automatic-speech-recognition",
-            model=model_name,
-            return_timestamps="word",
-        )
-    pipe = _indicwhisper_pipeline_cache[model_name]
-
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-    try:
-        result = pipe(tmp_path)
-    finally:
-        os.unlink(tmp_path)
-
-    transcript = (result.get("text") or "").strip()
-    words = []
-    for chunk in result.get("chunks", []):
-        ts = chunk.get("timestamp") or (None, None)
-        words.append({"word": chunk["text"].strip(), "start": ts[0] or 0.0, "end": ts[1] or 0.0})
-    return {"transcript": transcript, "words": words}
-
-
-# ── Fallback chain ────────────────────────────────────────────────────────────
-
-_AUTO_ORDER = ["sarvam", "claude", "indicwhisper"]
-
-
-def _stt_backends() -> dict:
-    return {
-        "sarvam":       ("sarvam_stt",        "saaras:v3",                   "async", _transcribe_with_sarvam),
-        "claude":       ("claude_stt",         settings.anthropic_model,      "async", _transcribe_with_claude),
-        "indicwhisper": ("indicwhisper_local", settings.indicwhisper_model,   "sync",  _transcribe_with_indicwhisper),
-    }
-
-
-async def _transcribe_audio(audio_bytes: bytes, filename: str, language_code: str, suffix: str) -> tuple[dict, str, str]:
+async def _transcribe_audio(
+    audio_bytes: bytes,
+    filename: str,
+    language_code: str,
+    suffix: str,
+) -> tuple[dict, str, str]:
     """Returns (transcript_data, transcription_mode, transcription_version).
 
-    STT_BACKEND in .env controls behaviour:
-      "sarvam"       — Sarvam only, no fallback
-      "claude"       — Claude API only
-      "indicwhisper" — local IndicWhisper only
-      "auto"         — tries Sarvam → Claude → IndicWhisper, stops at first success
+    STT_BACKEND=sarvam (production default).
+    No fallback — if Sarvam fails the exception propagates and kills the pipeline.
     """
-    import asyncio
-
-    backend = settings.stt_backend.lower()
-    backends = _stt_backends()
-
-    if backend in backends:
-        mode_label, version_label, call_type, fn = backends[backend]
-        if call_type == "sync":
-            data = await asyncio.to_thread(fn, audio_bytes, filename, language_code, suffix)
-        else:
-            data = await fn(audio_bytes, filename, language_code, suffix)
-        return data, mode_label, version_label
-
-    # "auto" — try each backend in order, fall back on any error
-    last_exc: Exception | None = None
-    for key in _AUTO_ORDER:
-        mode_label, version_label, call_type, fn = backends[key]
-        try:
-            if call_type == "sync":
-                data = await asyncio.to_thread(fn, audio_bytes, filename, language_code, suffix)
-            else:
-                data = await fn(audio_bytes, filename, language_code, suffix)
-            if last_exc:
-                log.info("stt_fallback_succeeded", backend=key, previous_error=str(last_exc))
-            return data, mode_label, version_label
-        except Exception as exc:
-            log.warning("stt_backend_failed", backend=key, error=str(exc))
-            last_exc = exc
-
-    raise last_exc or RuntimeError("All STT backends failed")
+    data, en_text = await _sarvam_stt_and_translate_parallel(
+        audio_bytes, filename, language_code, suffix
+    )
+    if en_text:
+        data["text_en_sarvam"] = en_text
+    return data, "sarvam_stt", "saaras:v3"
 
 
 async def _transcribe_with_auto_split(
@@ -257,6 +257,7 @@ async def _transcribe_with_auto_split(
 
     all_text: list[str] = []
     all_words: list[dict] = []
+    all_en_sarvam: list[str] = []
     last_mode = "sarvam_stt"
     last_version = "saaras:v3"
     time_offset = 0.0
@@ -271,6 +272,9 @@ async def _transcribe_with_auto_split(
                 text = (data.get("transcript") or "").strip()
                 if text:
                     all_text.append(text)
+                en = (data.get("text_en_sarvam") or "").strip()
+                if en:
+                    all_en_sarvam.append(en)
                 for w in data.get("words") or []:
                     all_words.append({
                         **w,
@@ -294,8 +298,13 @@ async def _transcribe_with_auto_split(
     if not all_text:
         raise RuntimeError("All segments failed to transcribe")
 
-    log.info("audio_auto_split_merged", segments=len(seg_paths), words=len(all_words))
-    return {"transcript": " ".join(all_text), "words": all_words}, last_mode, last_version
+    result: dict = {"transcript": " ".join(all_text), "words": all_words}
+    if all_en_sarvam:
+        result["text_en_sarvam"] = " ".join(all_en_sarvam)
+
+    log.info("audio_auto_split_merged", segments=len(seg_paths), words=len(all_words),
+             sarvam_en_segments=len(all_en_sarvam))
+    return result, last_mode, last_version
 
 
 @router.post("/transcribe", response_model=AudioTranscribeResponse)
@@ -321,6 +330,7 @@ async def transcribe_audio(
     if len(audio_bytes) > 100 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large. Max 100MB.")
     source_file_path, content_sha256 = _save_audio_source(file.filename or "audio", audio_bytes)
+    reset_translation_provider_state()
 
     log.info("audio_transcribe_start", file=file.filename, lang=language_code, size_mb=round(len(audio_bytes)/1e6, 2), stt_backend=settings.stt_backend)
 
@@ -354,7 +364,26 @@ async def transcribe_audio(
         "source_file_path": source_file_path,
         "content_sha256": content_sha256,
     }
-    chunk_result = await chunk_and_index(transcript_data, file.filename, file_metadata, dataset_id=ds_id)
+    try:
+        chunk_result = await chunk_and_index(transcript_data, file.filename, file_metadata, dataset_id=ds_id)
+    except Exception as exc:
+        record_ingestion_run(
+            kind="audio",
+            source=file_metadata["source"],
+            source_title=file_metadata["source_title"],
+            file_name=file.filename or "",
+            language=language_code,
+            dataset_id=ds_id,
+            status="failed",
+            error=str(exc),
+            transcription_mode=transcription_mode,
+            transcription_version=transcription_version,
+            metadata={
+                "source_file_path": source_file_path,
+                "content_sha256": content_sha256,
+            },
+        )
+        raise HTTPException(status_code=503, detail="Translation/indexing providers unavailable; retry later.") from exc
     if ds_id:
         dataset_store.increment_count(ds_id, chunk_result.get("chunks_created", 0))
 
@@ -418,8 +447,31 @@ async def transcribe_audio(
         translation_version=chunk_result.get("translation_version"),
         transcript_file=transcript_file_name,
     )
+    run_id = record_ingestion_run(
+        kind="audio",
+        source=file_metadata["source"],
+        source_title=file_metadata["source_title"],
+        file_name=file.filename or "",
+        language=language_code,
+        dataset_id=ds_id,
+        status="ok",
+        chunks=chunk_result["chunks_created"],
+        vectors=chunk_result.get("vectors_upserted") or 0,
+        vector_db=chunk_result.get("vector_db"),
+        embedding_backend=chunk_result.get("embedding_backend"),
+        transcription_mode=transcription_mode,
+        transcription_version=transcription_version,
+        translation_backend=chunk_result.get("translation_backend"),
+        translation_version=chunk_result.get("translation_version"),
+        metadata={
+            "transcript_file": str(transcript_path),
+            "source_file_path": source_file_path,
+            "content_sha256": content_sha256,
+        },
+    )
     _append_audio_audit({
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
         "role": "audio_transcript_indexed",
         "file_path": source_file_path,
         "original_filename": file.filename,
@@ -434,6 +486,10 @@ async def transcribe_audio(
         "vectors_upserted": chunk_result.get("vectors_upserted"),
         "vector_db": chunk_result.get("vector_db"),
         "embedding_backend": chunk_result.get("embedding_backend"),
+        "transcription_mode": transcription_mode,
+        "transcription_version": transcription_version,
+        "translation_backend": chunk_result.get("translation_backend"),
+        "translation_version": chunk_result.get("translation_version"),
     })
 
     return AudioTranscribeResponse(

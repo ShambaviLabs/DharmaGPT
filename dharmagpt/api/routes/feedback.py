@@ -12,6 +12,7 @@ from __future__ import annotations
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from api.auth import require_admin_api_key
+from core.insight_store import update_query_rating
 from evaluation.gold_store import (
     load_gold_entries,
     list_pending_feedback,
@@ -34,9 +35,12 @@ async def submit_feedback(request: FeedbackRequest) -> dict:
         "sources": [s.model_dump() for s in request.sources],
         "rating": request.rating.value,
         "note": request.note,
+        "llm_backend": request.llm_backend,
+        "llm_model": request.llm_model,
         "review_status": "pending",
     }
     save_feedback_response(record)
+    update_query_rating(request.query_id, request.rating.value)
     log.info("feedback_saved", query_id=request.query_id, rating=request.rating.value)
     return {"status": "saved", "query_id": request.query_id}
 

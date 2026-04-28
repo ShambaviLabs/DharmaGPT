@@ -1,59 +1,37 @@
+"""
+retrieval.py — vector retrieval, delegating all embedding to the backend registry.
+
+Embedding backend: EMBEDDING_BACKEND in .env (default: openai)
+Vector DB backend: RAG_BACKEND / VECTOR_DB_BACKEND in .env (default: local)
+"""
+from __future__ import annotations
+
 import structlog
-import hashlib
-import math
-import re
-from pinecone import Pinecone
-from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
+
 from core.config import get_settings
 from core.dataset_store import any_registered, get_active_names
 from core.local_vector_store import query_vectors
+from core.backends.embedding import get_embedder
 from models.schemas import SourceChunk
 
 log = structlog.get_logger()
 settings = get_settings()
 
-_pc: Pinecone | None = None
-_openai: AsyncOpenAI | None = None
-_TOKEN_RE = re.compile(r"[\w\u0900-\u0d7f]+", re.UNICODE)
 
-
-def get_pinecone() -> Pinecone:
-    global _pc
-    if _pc is None:
-        _pc = Pinecone(api_key=settings.pinecone_api_key)
-    return _pc
-
-
-def get_openai() -> AsyncOpenAI:
-    global _openai
-    if _openai is None:
-        _openai = AsyncOpenAI(api_key=settings.openai_api_key)
-    return _openai
+def get_pinecone():
+    from pinecone import Pinecone
+    return Pinecone(api_key=settings.pinecone_api_key)
 
 
 def embed_text_local(text: str, dims: int | None = None) -> list[float]:
-    """Deterministic local embedding used when cloud embeddings are unavailable."""
-    dims = dims or settings.embedding_dims
-    vector = [0.0] * dims
-    tokens = _TOKEN_RE.findall(text.lower())
-    if not tokens:
-        tokens = [text.lower()]
-
-    for token in tokens:
-        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-        bucket = int.from_bytes(digest[:4], "big") % dims
-        sign = 1.0 if digest[4] & 1 else -1.0
-        vector[bucket] += sign
-
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0.0:
-        return vector
-    return [value / norm for value in vector]
+    """Backward compat — delegates to registry embedder."""
+    return get_embedder().embed_query(text)
 
 
 def embed_texts_local(texts: list[str], dims: int | None = None) -> list[list[float]]:
-    return [embed_text_local(text, dims=dims) for text in texts]
+    """Backward compat — delegates to registry embedder."""
+    return get_embedder().embed_documents(texts)
 
 
 def use_local_hash_embeddings() -> bool:
@@ -61,65 +39,34 @@ def use_local_hash_embeddings() -> bool:
 
 
 async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str]:
-    if use_local_hash_embeddings():
-        return embed_texts_local(texts), "local_hash"
-
-    try:
-        client = get_openai()
-        response = await client.embeddings.create(
-            model=settings.embedding_model,
-            input=texts,
-        )
-        return [row.embedding for row in response.data], "openai"
-    except Exception as exc:
-        if settings.vector_db_backend.lower() == "local":
-            log.warning("embedding_fallback_local", error=str(exc))
-            return embed_texts_local(texts), "local_hash"
-        log.warning("embedding_failed", error=str(exc))
-        raise
-
-
-def _source_text_from_metadata(meta: dict) -> str:
-    """
-    Choose the richest text available for retrieval context.
-
-    Prefer the full stored chunk text, then any translated text, and only fall
-    back to the preview when necessary.
-    """
-    base_text = (meta.get("text") or "").strip()
-    translated_text = (meta.get("translated_text") or meta.get("text_en") or meta.get("text_en_model") or "").strip()
-    preview = (meta.get("text_preview") or "").strip()
-    language = (meta.get("language") or "").strip().lower()
-
-    if base_text and translated_text and translated_text != base_text:
-        if language and language != "en":
-            return f"{base_text}\n\nEnglish translation:\n{translated_text}"
-        if meta.get("source_type") == "audio":
-            return f"{base_text}\n\nEnglish translation:\n{translated_text}"
-        return base_text
-
-    if base_text:
-        return base_text
-    if translated_text:
-        return translated_text
-    return preview
+    """Embed a batch of texts. Returns (vectors, backend_name)."""
+    import asyncio
+    embedder = get_embedder()
+    vectors = await asyncio.to_thread(embedder.embed_documents, texts)
+    backend_name = type(embedder).__name__.lower().replace("embeddings", "")
+    return vectors, backend_name
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
 async def embed_query(text: str) -> list[float]:
-    if settings.vector_db_backend.lower() == "local" or use_local_hash_embeddings():
-        return embed_text_local(text)
+    import asyncio
+    return await asyncio.to_thread(get_embedder().embed_query, text)
 
-    try:
-        client = get_openai()
-        response = await client.embeddings.create(
-            model=settings.embedding_model,
-            input=[text],
-        )
-        return response.data[0].embedding
-    except Exception as exc:
-        log.warning("embedding_failed", error=str(exc))
-        raise
+
+def _source_text_from_metadata(meta: dict) -> str:
+    base_text = (meta.get("text") or "").strip()
+    translated_text = (
+        meta.get("translated_text") or meta.get("text_en") or meta.get("text_en_model") or ""
+    ).strip()
+    preview = (meta.get("text_preview") or "").strip()
+    language = (meta.get("language") or "").strip().lower()
+
+    if base_text and translated_text and translated_text != base_text:
+        if (language and language != "en") or meta.get("source_type") == "audio":
+            return f"{base_text}\n\nEnglish translation:\n{translated_text}"
+        return base_text
+
+    return base_text or translated_text or preview
 
 
 async def retrieve(
@@ -128,20 +75,15 @@ async def retrieve(
     filter_section: str | None = None,
     filter_source_type: str | None = None,
 ) -> list[SourceChunk]:
-    """
-    Embed query and retrieve top-k chunks from configured vector DB.
-    Returns SourceChunk list sorted by relevance score.
-    """
     top_k = top_k or settings.rag_top_k
 
-    # Early-exit before any embedding or DB calls if all datasets are disabled
     if any_registered() and not get_active_names():
         return []
 
     vector = await embed_query(query)
-
+    backend = (settings.rag_backend or settings.vector_db_backend or "local").lower()
     matches: list[dict]
-    backend = settings.vector_db_backend.lower()
+
     if backend == "local":
         matches = query_vectors(
             vector=vector,
@@ -155,39 +97,24 @@ async def retrieve(
     else:
         pc = get_pinecone()
         index = pc.Index(settings.pinecone_index_name)
-
-        # Build metadata filter — "kanda" is the legacy Pinecone field name
         pf: dict = {}
         if filter_section:
             pf["kanda"] = {"$eq": filter_section}
         if filter_source_type:
             pf["source_type"] = {"$eq": filter_source_type}
-
-        # Dataset filter — only apply when datasets have been registered
         if any_registered():
             pf["dataset_id"] = {"$in": get_active_names()}
-
         results = index.query(
-            vector=vector,
-            top_k=top_k,
-            include_metadata=True,
-            filter=pf if pf else None,
+            vector=vector, top_k=top_k, include_metadata=True, filter=pf if pf else None,
         )
-        matches = [
-            {
-                "score": match.score,
-                "metadata": match.metadata or {},
-            }
-            for match in results.matches
-        ]
+        matches = [{"score": m.score, "metadata": m.metadata or {}} for m in results.matches]
 
-    chunks = []
+    chunks: list[SourceChunk] = []
     for match in matches:
         score = float(match.get("score") or 0.0)
         if score < settings.rag_min_score:
             continue
         meta = match.get("metadata") or {}
-        # "section"/"chapter"/"verse" are new names; fall back to legacy "kanda"/"sarga" keys
         section = meta.get("section") or meta.get("kanda") or None
         chapter_raw = meta.get("chapter") or meta.get("sarga")
         verse_raw = meta.get("verse")
@@ -200,7 +127,7 @@ async def retrieve(
             score=round(score, 4),
             source_type=meta.get("source_type", "text"),
             audio_timestamp=(
-                f"{meta.get('start_time_sec', '')}s–{meta.get('end_time_sec', '')}s"
+                f"{meta.get('start_time_sec', '')}s-{meta.get('end_time_sec', '')}s"
                 if meta.get("source_type") == "audio" else None
             ),
             url=meta.get("url"),
@@ -211,10 +138,6 @@ async def retrieve(
 
 
 def _full_citation(chunk: SourceChunk) -> str:
-    """
-    Return the richest possible citation string for a passage header.
-    Appends chapter/verse to the stored citation if they aren't already present.
-    """
     base = chunk.citation or ""
     extras: list[str] = []
     if chunk.chapter is not None and str(chunk.chapter) not in base:
@@ -227,12 +150,10 @@ def _full_citation(chunk: SourceChunk) -> str:
 
 
 def format_context(chunks: list[SourceChunk], max_chars: int | None = None) -> str:
-    """Format retrieved chunks into a context block for the LLM prompt."""
     max_chars = max_chars or settings.max_context_chars
-    parts = []
-    total = 0
+    parts, total = [], 0
     for i, chunk in enumerate(chunks, 1):
-        src = f"[PASSAGE {i} — {_full_citation(chunk)}]"
+        src = f"[PASSAGE {i} - {_full_citation(chunk)}]"
         if chunk.source_type == "audio" and chunk.audio_timestamp:
             src += f" [Audio @ {chunk.audio_timestamp}]"
         block = f"{src}\n{chunk.text}"

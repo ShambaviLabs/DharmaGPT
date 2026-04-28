@@ -46,6 +46,18 @@ Thumbs.db
 *.err
 logs/
 
+# Local Postgres install and data
+.local-postgres/
+
+# Local vector stores are not used in beta; Pinecone is the vector database.
+knowledge/stores/local_vectors.sqlite3
+knowledge/stores/chunk_store.sqlite3
+knowledge/stores/datasets.sqlite3
+knowledge/stores/ingestion_insights.sqlite3
+knowledge/vector_store/
+dharmagpt/knowledge/incoming/audio/*
+!dharmagpt/knowledge/incoming/audio/.gitkeep
+
 # Local machine helpers
 run_batch.bat
 
