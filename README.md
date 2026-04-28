@@ -109,6 +109,30 @@ cp .env.example .env   # fill in your keys
 uvicorn api.main:app --reload --port 8000
 ```
 
+### Beta Deployment
+
+For the beta server, the repo now includes a repeatable deploy script:
+
+```bash
+scripts/deploy_beta.sh
+```
+
+It will:
+
+- pull the latest git commit
+- install Python dependencies in `dharmagpt/.venv`
+- write and enable the `dharmagptbeta-server.service` user unit
+- run `migrate_sqlite_to_postgres.py`
+- run `migrate_local_vectors_to_pinecone.py --create-index` when `PINECONE_API_KEY` is set
+- restart the FastAPI service and wait for `/health`
+
+Notes:
+
+- The beta host needs outbound internet access to Pinecone for the vector migration step.
+- The script expects `dharmagpt/.env` to exist and contain the API keys plus `DATABASE_URL`.
+- If the beta host sits behind a proxy, export `HTTPS_PROXY` and `HTTP_PROXY` before running the deploy script.
+- If you want the service to survive logout, enable lingering for the beta user with `loginctl enable-linger <user>`.
+
 ### Local Translation Backends
 
 For Telugu to English translation, the audio pipeline now supports multiple backends:
