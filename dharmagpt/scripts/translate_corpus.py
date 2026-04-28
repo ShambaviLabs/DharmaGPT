@@ -3,7 +3,9 @@ translate_corpus.py — batch-translate processed JSONL corpus records to Englis
 
 Reads JSONL files under knowledge/processed/ and fills the text_en_model field
 for records that are not yet translated (non-English, no existing text_en_model).
-Tries Anthropic first, falls back to Ollama, then IndicTrans2.
+
+Uses the configured TRANSLATION_BACKEND from .env (default: sarvam).
+No fallbacks — if translation fails, the exception propagates and kills the run.
 
 Usage:
     python scripts/translate_corpus.py
@@ -20,11 +22,9 @@ from pathlib import Path
 
 import structlog
 
-from core.config import get_settings
-from core.translation import TranslationBackend, TranslationConfig, translate_text
+from core.backends.translation import get_translator
 
 log = structlog.get_logger()
-settings = get_settings()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROCESSED_DIR = REPO_ROOT / "knowledge" / "processed"
@@ -47,27 +47,6 @@ def _write_records(path: Path, records: list[dict]) -> None:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     tmp_path.replace(path)
-
-
-def _translation_config() -> TranslationConfig:
-    return TranslationConfig(
-        backend=TranslationBackend.auto,
-        sarvam_model=settings.sarvam_translation_model,
-        sarvam_api_key=settings.sarvam_api_key,
-        anthropic_model=settings.anthropic_model,
-        anthropic_api_key=settings.anthropic_api_key,
-        openai_model=settings.openai_translation_model,
-        openai_api_key=settings.openai_api_key,
-        ollama_model=settings.ollama_model,
-        ollama_url=settings.ollama_url,
-        indictrans2_model=settings.indictrans2_model,
-        local_first=settings.translation_local_first,
-        backend_order=tuple(
-            item.strip()
-            for item in (settings.translation_backend_order or "").split(",")
-            if item.strip()
-        ),
-    )
 
 
 def _source_text(record: dict) -> str:
@@ -99,7 +78,7 @@ def _needs_translation(record: dict, force: bool) -> bool:
     return _source_lang(record) != "en"
 
 
-def _translate_record(record: dict, *, config: TranslationConfig, force: bool) -> tuple[dict, bool]:
+def _translate_record(record: dict, *, force: bool) -> tuple[dict, bool]:
     if not _needs_translation(record, force):
         return record, False
 
@@ -107,41 +86,30 @@ def _translate_record(record: dict, *, config: TranslationConfig, force: bool) -
     if not source_text:
         return record, False
 
-    try:
-        outcome = translate_text(
-            source_text,
-            config=config,
-            source_lang=_source_lang(record),
-            target_lang="en",
-        )
-    except Exception as exc:
-        record["translation_mode"] = config.backend.value
-        record["translation_backend"] = ""
-        record["translation_version"] = ""
-        record["translation_fallback_reason"] = f"error:{exc}"
-        record["translation_attempted_backends"] = []
+    translator = get_translator()
+    result = translator.translate(
+        source_text,
+        source_lang=_source_lang(record),
+        target_lang="en",
+    )
+
+    if result.skipped:
         return record, False
 
-    # Keep both field names for compatibility with ingestion, manual review,
-    # and existing processed corpora.
-    record["text_en_model"] = outcome.text
-    record["text_en"] = outcome.text
-    record["translation_mode"] = outcome.requested_mode
-    record["translation_backend"] = outcome.backend
-    record["translation_version"] = outcome.version
-    record["translation_fallback_reason"] = outcome.fallback_reason
-    record["translation_attempted_backends"] = list(outcome.attempted_backends)
+    # Keep both field names for compatibility with ingestion and existing corpora.
+    record["text_en_model"] = result.text
+    record["text_en"] = result.text
+    record["translation_backend"] = result.backend
     return record, True
 
 
 def process_file(path: Path, *, max_workers: int, force: bool) -> dict:
     records = _load_records(path)
-    config = _translation_config()
     updated = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_translate_record, record.copy(), config=config, force=force): idx
+            executor.submit(_translate_record, record.copy(), force=force): idx
             for idx, record in enumerate(records)
         }
         for future in as_completed(futures):
@@ -162,11 +130,36 @@ def process_file(path: Path, *, max_workers: int, force: bool) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Batch auto-translate processed JSONL datasets")
-    parser.add_argument("--file", type=str, default=None, help="Translate a single JSONL file from knowledge/processed/")
-    parser.add_argument("--force", action="store_true", help="Re-translate even if text_en_model already exists")
-    parser.add_argument("--max-workers", type=int, default=4, help="Parallel translation workers")
+    parser = argparse.ArgumentParser(
+        description="Pass 1 of the two-pass translation pipeline.\n"
+                    "Translates missing records using the configured backend (default: ollama for bulk).\n"
+                    "Run fix_bad_translations.py afterwards for pass 2 (Sarvam quality fix).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--file", type=str, default=None,
+        help="Translate a single JSONL file (relative to knowledge/processed/)",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Re-translate even if text_en_model already exists",
+    )
+    parser.add_argument(
+        "--max-workers", type=int, default=4,
+        help="Parallel translation workers (default: 4)",
+    )
+    parser.add_argument(
+        "--backend", type=str, default=None,
+        help="Override TRANSLATION_BACKEND for this run (ollama | sarvam | anthropic | skip)",
+    )
     args = parser.parse_args()
+
+    # Backend override — set before get_translator() is called so lru_cache picks it up
+    if args.backend:
+        import os
+        os.environ["TRANSLATION_BACKEND"] = args.backend.lower()
+        from core.backends import translation as _tb
+        _tb.get_translator.cache_clear()
 
     if args.file:
         files = [PROCESSED_DIR / args.file]
@@ -178,10 +171,18 @@ def main() -> None:
     if not files:
         raise SystemExit(f"No JSONL files found in {PROCESSED_DIR}")
 
+    from core.backends.translation import get_translator
+    backend_name = get_translator().backend_name
+    print(f"Backend: {backend_name}  |  Files: {len(files)}")
+
+    total_updated = 0
     for path in files:
         result = process_file(path, max_workers=max(1, args.max_workers), force=args.force)
-        log.info("auto_translation_complete", **result)
-        print(f"{result['file']}: updated {result['updated']} of {result['records']} records")
+        log.info("translation_complete", **result)
+        if result["updated"]:
+            print(f"  {result['file']}: +{result['updated']} of {result['records']}")
+            total_updated += result["updated"]
+    print(f"\nDone. Total translated: {total_updated}")
 
 
 if __name__ == "__main__":

@@ -300,19 +300,8 @@ async def test_retrieval_returns_empty_when_all_datasets_disabled(monkeypatch, t
     monkeypatch.setattr(retrieval_mod, "any_registered", tmp_db.any_registered)
     monkeypatch.setattr(retrieval_mod, "get_active_names", tmp_db.get_active_names)
 
-    from core.config import get_settings
-    settings = get_settings()
-    monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
-    monkeypatch.setattr(settings, "openai_api_key", "fake")
-
-    fake_embed_resp = MagicMock()
-    fake_embed_resp.data = [MagicMock(embedding=[0.1] * 10)]
-
-    with patch("core.retrieval.get_openai") as mock_get_openai:
-        mock_client = MagicMock()
-        mock_client.embeddings.create = AsyncMock(return_value=fake_embed_resp)
-        mock_get_openai.return_value = mock_client
-
+    # Early-exit happens before embed_query is called — assert it is never reached
+    with patch("core.retrieval.embed_query", new=AsyncMock(side_effect=AssertionError("embed_query called"))):
         from core.retrieval import retrieve
         results = await retrieve("What is dharma?")
 
@@ -332,22 +321,13 @@ async def test_retrieval_no_dataset_filter_when_none_registered(monkeypatch, tmp
     monkeypatch.setattr(settings, "openai_api_key", "fake")
     monkeypatch.setattr(settings, "rag_min_score", 0.0)
 
-    fake_embed_resp = MagicMock()
-    fake_embed_resp.data = [MagicMock(embedding=[0.1] * 10)]
-
     pinecone_result = MagicMock()
     pinecone_result.matches = []
-
     mock_index = MagicMock()
     mock_index.query.return_value = pinecone_result
 
-    with patch("core.retrieval.get_openai") as mock_get_openai, \
+    with patch("core.retrieval.embed_query", new=AsyncMock(return_value=[0.1] * 10)), \
          patch("core.retrieval.get_pinecone") as mock_get_pc:
-
-        mock_client = MagicMock()
-        mock_client.embeddings.create = AsyncMock(return_value=fake_embed_resp)
-        mock_get_openai.return_value = mock_client
-
         mock_pc = MagicMock()
         mock_pc.Index.return_value = mock_index
         mock_get_pc.return_value = mock_pc
