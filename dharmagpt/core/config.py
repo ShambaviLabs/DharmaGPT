@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     llm_backend: str = "anthropic"
     anthropic_model: str = "claude-sonnet-4-20250514"
     llm_model: str | None = None       # override model name if needed
+    ollama_model: str = "qwen2.5:1.5b"  # compatibility alias for local test fixtures
+    ollama_url: str = "http://localhost:11434"
     llm_timeout_sec: int = 120
 
     # RAG_BACKEND: pinecone | local
@@ -78,7 +80,11 @@ class Settings(BaseSettings):
 
     @property
     def resolved_llm_model(self) -> str:
-        return self.llm_model or self.anthropic_model
+        if self.llm_model:
+            return self.llm_model
+        if self.llm_backend.lower() == "ollama":
+            return self.ollama_model
+        return self.anthropic_model
 
     def evaluation_model_for(self, role: str) -> tuple[str, str, str, str, int]:
         if role == "primary":

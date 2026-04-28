@@ -19,6 +19,7 @@ import json
 import os
 import sqlite3
 import sys
+import subprocess
 from pathlib import Path
 
 import structlog
@@ -28,6 +29,8 @@ from pinecone import Pinecone, ServerlessSpec
 
 load_dotenv()
 log = structlog.get_logger()
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CORPUS_METRICS = REPO_ROOT / "dharmagpt" / "scripts" / "corpus_metrics.py"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -218,7 +221,7 @@ def ingest(dry_run: bool = False, limit: int | None = None, reset: bool = False)
 
     # Show updated metrics
     print("\n=== POST-INGEST METRICS ===")
-    os.system("python scripts/corpus_metrics.py")
+    subprocess.run([sys.executable, str(CORPUS_METRICS)], check=True)
 
 
 def main() -> None:

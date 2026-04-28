@@ -46,11 +46,11 @@ async def health() -> HealthResponse:
     return HealthResponse(
         status="ok" if all([vector_ok, anthropic_ok, sarvam_ok]) else "degraded",
         pinecone=pinecone_ok,
-        vector_backend="pinecone",
+        vector_backend=settings.vector_db_backend,
         vector_store=vector_ok,
         anthropic=anthropic_ok,
         sarvam=sarvam_ok,
         vector_name=vector_name,
-        llm_backend="anthropic",
-        llm_local=False,
+        llm_backend=settings.llm_backend,
+        llm_local=settings.llm_backend.lower() == "ollama",
     )

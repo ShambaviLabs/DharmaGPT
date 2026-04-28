@@ -220,6 +220,7 @@ async def test_chunker_routes_to_pinecone(monkeypatch):
     """chunk_and_index upserts vectors to Pinecone."""
     from core.config import get_settings
     settings = get_settings()
+    monkeypatch.setattr(settings, "rag_backend", "pinecone")
     monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
     monkeypatch.setattr(settings, "openai_api_key", "fake-key")
 
@@ -260,6 +261,7 @@ async def test_chunker_stamps_dataset_id_on_metadata(monkeypatch):
     """Every chunk must carry dataset_id in its Pinecone metadata."""
     from core.config import get_settings
     settings = get_settings()
+    monkeypatch.setattr(settings, "rag_backend", "pinecone")
     monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
     monkeypatch.setattr(settings, "openai_api_key", "fake-key")
 
@@ -317,6 +319,7 @@ async def test_retrieval_no_dataset_filter_when_none_registered(monkeypatch, tmp
 
     from core.config import get_settings
     settings = get_settings()
+    monkeypatch.setattr(settings, "rag_backend", "pinecone")
     monkeypatch.setattr(settings, "vector_db_backend", "pinecone")
     monkeypatch.setattr(settings, "openai_api_key", "fake")
     monkeypatch.setattr(settings, "rag_min_score", 0.0)
