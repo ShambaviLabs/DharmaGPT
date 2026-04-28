@@ -7,6 +7,9 @@ on:
   pull_request:
     branches:
       - main
+      - release
+      - release/**
+      - master
 
 jobs:
   unit-tests:
@@ -110,7 +113,9 @@ jobs:
     name: Smoke and contract tests
     runs-on: ubuntu-latest
     needs: unit-tests
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.base_ref == 'main' || github.base_ref == 'release' || startsWith(github.base_ref, 'release/') || github.base_ref == 'master')
 
     defaults:
       run:
@@ -145,8 +150,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit-tests
     if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')) ||
-      (github.event_name == 'pull_request' && startsWith(github.base_ref, 'release/'))
+      (github.event_name == 'push' && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/release/'))) ||
+      (github.event_name == 'pull_request' && (github.base_ref == 'release' || startsWith(github.base_ref, 'release/')))
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
