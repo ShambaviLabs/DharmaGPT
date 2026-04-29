@@ -121,6 +121,16 @@ def test_split_threshold_constant():
     assert _SEGMENT_SECS == 29
 
 
+def test_zero_indexed_generated_audio_parts_map_to_canonical_parts():
+    from utils.naming import part_number_from_filename
+
+    assert part_number_from_filename("source_te_audio_part0000.mp3") == 1
+    assert part_number_from_filename("source_te_audio_part0001.mp3") == 2
+    assert part_number_from_filename("source_te_audio_part0281.mp3") == 282
+    assert part_number_from_filename("source_te_transcript_part01.jsonl") == 1
+    assert part_number_from_filename("source_te_transcript_part12.jsonl") == 12
+
+
 def test_ollama_embedding_backend_batches_requests(monkeypatch):
     from core.backends.embedding import OllamaEmbeddings
 
