@@ -56,17 +56,21 @@ class Settings(BaseSettings):
     rag_min_score: float = 0.35
     max_context_chars: int = 6000
 
-    # ── Evaluation judges (Sarvam models understand Telugu/Sanskrit) ──────────
-    evaluation_primary_backend: str = "openai"
-    evaluation_primary_model: str = "sarvamai/sarvam-m"
+    # ── Evaluation judge ──────────────────────────────────────────────────────
+    # Default policy: one Anthropic judge call per response. Local Ollama is used
+    # for serving; Sarvam is reserved for corpus creation/transcription.
+    evaluation_primary_backend: str = "anthropic"
+    evaluation_primary_model: str = "claude-sonnet-4-20250514"
     evaluation_primary_api_key: str = ""
-    evaluation_primary_base_url: str = "http://localhost:8000/v1"
+    evaluation_primary_base_url: str = ""
     evaluation_primary_timeout_sec: int = 120
 
-    evaluation_secondary_backend: str = "openai"
-    evaluation_secondary_model: str = "sarvamai/sarvam-30b"
+    # Retained for compatibility with older reports/configs; current scorer uses
+    # only the primary judge by default.
+    evaluation_secondary_backend: str = "anthropic"
+    evaluation_secondary_model: str = "claude-sonnet-4-20250514"
     evaluation_secondary_api_key: str = ""
-    evaluation_secondary_base_url: str = "http://localhost:8000/v1"
+    evaluation_secondary_base_url: str = ""
     evaluation_secondary_timeout_sec: int = 120
 
     # ── Admin / review API ────────────────────────────────────────────────────
@@ -87,20 +91,38 @@ class Settings(BaseSettings):
         return self.anthropic_model
 
     def evaluation_model_for(self, role: str) -> tuple[str, str, str, str, int]:
+        def _fallback_key(backend: str, configured_key: str) -> str:
+            if configured_key:
+                return configured_key
+            if backend == "anthropic":
+                return self.anthropic_api_key
+            if backend == "openai":
+                return self.openai_api_key
+            return ""
+
+        def _fallback_base_url(backend: str, configured_url: str) -> str:
+            if configured_url:
+                return configured_url
+            if backend == "ollama":
+                return self.ollama_url
+            return ""
+
         if role == "primary":
+            backend = self.evaluation_primary_backend
             return (
-                self.evaluation_primary_backend,
+                backend,
                 self.evaluation_primary_model,
-                self.evaluation_primary_api_key,
-                self.evaluation_primary_base_url,
+                _fallback_key(backend, self.evaluation_primary_api_key),
+                _fallback_base_url(backend, self.evaluation_primary_base_url),
                 self.evaluation_primary_timeout_sec,
             )
         if role == "secondary":
+            backend = self.evaluation_secondary_backend
             return (
-                self.evaluation_secondary_backend,
+                backend,
                 self.evaluation_secondary_model,
-                self.evaluation_secondary_api_key,
-                self.evaluation_secondary_base_url,
+                _fallback_key(backend, self.evaluation_secondary_api_key),
+                _fallback_base_url(backend, self.evaluation_secondary_base_url),
                 self.evaluation_secondary_timeout_sec,
             )
         raise ValueError(f"Unknown evaluation role: {role}")
