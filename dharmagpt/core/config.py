@@ -22,8 +22,9 @@ class Settings(BaseSettings):
     pinecone_api_key: str = ""
 
     # ── Backend selection (all pluggable via .env) ────────────────────────────
-    # TRANSLATION_BACKEND: sarvam | anthropic | skip
+    # TRANSLATION_BACKEND: sarvam | anthropic | openai | ollama | indictrans2 | skip
     translation_backend: str = "sarvam"
+    indictrans2_model: str = "ai4bharat/indictrans2-indic-en-dist-200M"
 
     # EMBEDDING_BACKEND: openai
     embedding_backend: str = "openai"
@@ -48,7 +49,7 @@ class Settings(BaseSettings):
     local_vector_index_name: str = "dharma-local"
     local_vector_namespace: str = "default"
 
-    # STT_BACKEND: sarvam
+    # STT_BACKEND: sarvam | indicconformer
     stt_backend: str = "sarvam"
 
     # ── RAG tuning ────────────────────────────────────────────────────────────
