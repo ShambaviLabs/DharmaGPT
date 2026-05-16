@@ -127,12 +127,27 @@ def ensure_schema(conn: psycopg.Connection) -> None:
             preview TEXT,
             translated_preview TEXT,
             metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            vector_status TEXT NOT NULL DEFAULT 'pending',
+            vector_index TEXT NOT NULL DEFAULT '',
+            vector_namespace TEXT NOT NULL DEFAULT '',
+            vector_error TEXT NOT NULL DEFAULT '',
+            vector_updated_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL
         )
         """
     )
+    conn.execute("ALTER TABLE chunk_store ADD COLUMN IF NOT EXISTS vector_status TEXT NOT NULL DEFAULT 'pending'")
+    conn.execute("ALTER TABLE chunk_store ADD COLUMN IF NOT EXISTS vector_index TEXT NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE chunk_store ADD COLUMN IF NOT EXISTS vector_namespace TEXT NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE chunk_store ADD COLUMN IF NOT EXISTS vector_error TEXT NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE chunk_store ADD COLUMN IF NOT EXISTS vector_updated_at TIMESTAMPTZ")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chunk_store_vector_status
+        ON chunk_store(vector_status, created_at)
+        """
+    )
 
-    # ── source_documents: PDF and text files ingested into the corpus ─────────
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS source_documents (
@@ -175,9 +190,6 @@ def ensure_schema(conn: psycopg.Connection) -> None:
         """
     )
 
-    # ── discourse_translations: manually provided translations for audio clips ─
-    # Each row pairs a chunk from an audio discourse with its English translation.
-    # Linked to the audio chunk via (source, chunk_index) or vector_chunk_id.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS discourse_translations (
@@ -217,12 +229,10 @@ def ensure_schema(conn: psycopg.Connection) -> None:
     )
 
 
-# ── discourse_translations CRUD ───────────────────────────────────────────────
-
 def _row_to_dict(row: dict) -> dict:
     return {
-        k: v.isoformat() if isinstance(v, datetime) else v
-        for k, v in row.items()
+        key: value.isoformat() if isinstance(value, datetime) else value
+        for key, value in row.items()
     }
 
 
@@ -248,7 +258,7 @@ def list_discourse_translations(
             f"SELECT * FROM discourse_translations {where} ORDER BY created_at DESC LIMIT %s",
             params,
         ).fetchall()
-    return [_row_to_dict(dict(r)) for r in rows]
+    return [_row_to_dict(dict(row)) for row in rows]
 
 
 def create_discourse_translation(
@@ -288,10 +298,24 @@ def create_discourse_translation(
             )
             """,
             (
-                row_id, source, source_title, chunk_index, vector_chunk_id,
-                original_text, original_language, translated_text, translated_language,
-                translator_name, section, start_time_sec, end_time_sec,
-                notes, verified, "{}", now, now,
+                row_id,
+                source,
+                source_title,
+                chunk_index,
+                vector_chunk_id,
+                original_text,
+                original_language,
+                translated_text,
+                translated_language,
+                translator_name,
+                section,
+                start_time_sec,
+                end_time_sec,
+                notes,
+                verified,
+                "{}",
+                now,
+                now,
             ),
         )
     return {"id": row_id, "created_at": now.isoformat()}
