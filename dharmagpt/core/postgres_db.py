@@ -7,6 +7,8 @@ store that holds full chunk text, dataset registry state, and richer metadata.
 from __future__ import annotations
 
 import os
+import uuid
+from datetime import datetime, timezone
 
 import psycopg
 from psycopg.rows import dict_row
@@ -129,3 +131,215 @@ def ensure_schema(conn: psycopg.Connection) -> None:
         )
         """
     )
+
+    # ── source_documents: PDF and text files ingested into the corpus ─────────
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_documents (
+            id TEXT PRIMARY KEY,
+            file_name TEXT NOT NULL,
+            file_sha256 TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            source_title TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL DEFAULT 'text',
+            language TEXT NOT NULL DEFAULT 'en',
+            section TEXT,
+            author TEXT NOT NULL DEFAULT '',
+            translator TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            dataset_id TEXT,
+            page_count INTEGER,
+            word_count INTEGER,
+            chunks_created INTEGER NOT NULL DEFAULT 0,
+            vectors_upserted INTEGER NOT NULL DEFAULT 0,
+            embedding_backend TEXT NOT NULL DEFAULT '',
+            vector_db TEXT NOT NULL DEFAULT '',
+            index_name TEXT NOT NULL DEFAULT '',
+            namespace TEXT NOT NULL DEFAULT '',
+            file_path TEXT NOT NULL DEFAULT '',
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            ingested_at TIMESTAMPTZ NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_documents_source
+        ON source_documents(source)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_documents_ingested_at
+        ON source_documents(ingested_at DESC)
+        """
+    )
+
+    # ── discourse_translations: manually provided translations for audio clips ─
+    # Each row pairs a chunk from an audio discourse with its English translation.
+    # Linked to the audio chunk via (source, chunk_index) or vector_chunk_id.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discourse_translations (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            source_title TEXT NOT NULL DEFAULT '',
+            chunk_index INTEGER,
+            vector_chunk_id TEXT,
+            original_text TEXT NOT NULL,
+            original_language TEXT NOT NULL DEFAULT 'te',
+            translated_text TEXT NOT NULL,
+            translated_language TEXT NOT NULL DEFAULT 'en',
+            translator_name TEXT NOT NULL DEFAULT '',
+            section TEXT,
+            start_time_sec DOUBLE PRECISION,
+            end_time_sec DOUBLE PRECISION,
+            notes TEXT NOT NULL DEFAULT '',
+            verified BOOLEAN NOT NULL DEFAULT FALSE,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_discourse_translations_source
+        ON discourse_translations(source)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_discourse_translations_chunk_id
+        ON discourse_translations(vector_chunk_id)
+        WHERE vector_chunk_id IS NOT NULL
+        """
+    )
+
+
+# ── discourse_translations CRUD ───────────────────────────────────────────────
+
+def _row_to_dict(row: dict) -> dict:
+    return {
+        k: v.isoformat() if isinstance(v, datetime) else v
+        for k, v in row.items()
+    }
+
+
+def list_discourse_translations(
+    source: str | None = None,
+    verified: bool | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    if not use_postgres():
+        return []
+    conditions: list[str] = []
+    params: list = []
+    if source:
+        conditions.append("source = %s")
+        params.append(source)
+    if verified is not None:
+        conditions.append("verified = %s")
+        params.append(verified)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(min(limit, 500))
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM discourse_translations {where} ORDER BY created_at DESC LIMIT %s",
+            params,
+        ).fetchall()
+    return [_row_to_dict(dict(r)) for r in rows]
+
+
+def create_discourse_translation(
+    *,
+    source: str,
+    source_title: str = "",
+    chunk_index: int | None = None,
+    vector_chunk_id: str | None = None,
+    original_text: str,
+    original_language: str = "te",
+    translated_text: str,
+    translated_language: str = "en",
+    translator_name: str = "",
+    section: str | None = None,
+    start_time_sec: float | None = None,
+    end_time_sec: float | None = None,
+    notes: str = "",
+    verified: bool = False,
+) -> dict:
+    if not use_postgres():
+        raise RuntimeError("DATABASE_URL is not configured")
+    now = datetime.now(timezone.utc)
+    row_id = uuid.uuid4().hex
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO discourse_translations (
+                id, source, source_title, chunk_index, vector_chunk_id,
+                original_text, original_language, translated_text, translated_language,
+                translator_name, section, start_time_sec, end_time_sec,
+                notes, verified, metadata_json, created_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s::jsonb, %s, %s
+            )
+            """,
+            (
+                row_id, source, source_title, chunk_index, vector_chunk_id,
+                original_text, original_language, translated_text, translated_language,
+                translator_name, section, start_time_sec, end_time_sec,
+                notes, verified, "{}", now, now,
+            ),
+        )
+    return {"id": row_id, "created_at": now.isoformat()}
+
+
+def update_discourse_translation(
+    row_id: str,
+    *,
+    translated_text: str | None = None,
+    verified: bool | None = None,
+    notes: str | None = None,
+    translator_name: str | None = None,
+) -> bool:
+    if not use_postgres():
+        return False
+    sets: list[str] = []
+    params: list = []
+    if translated_text is not None:
+        sets.append("translated_text = %s")
+        params.append(translated_text)
+    if verified is not None:
+        sets.append("verified = %s")
+        params.append(verified)
+    if notes is not None:
+        sets.append("notes = %s")
+        params.append(notes)
+    if translator_name is not None:
+        sets.append("translator_name = %s")
+        params.append(translator_name)
+    if not sets:
+        return True
+    sets.append("updated_at = %s")
+    params.append(datetime.now(timezone.utc))
+    params.append(row_id)
+    with connect() as conn:
+        result = conn.execute(
+            f"UPDATE discourse_translations SET {', '.join(sets)} WHERE id = %s",
+            params,
+        )
+    return (result.rowcount or 0) > 0
+
+
+def delete_discourse_translation(row_id: str) -> bool:
+    if not use_postgres():
+        return False
+    with connect() as conn:
+        result = conn.execute(
+            "DELETE FROM discourse_translations WHERE id = %s",
+            (row_id,),
+        )
+    return (result.rowcount or 0) > 0

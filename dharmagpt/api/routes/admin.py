@@ -545,30 +545,6 @@ def _feedback_page() -> str:
       <div class="notice" id="notice"></div>
     </div>
 
-    <div class="controls" style="align-items: center;">
-      <div class="field" style="min-width: 240px;">
-        <label for="audioFile">Audio File</label>
-        <input id="audioFile" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.opus" />
-      </div>
-      <div class="field" style="min-width: 160px;">
-        <label for="audioLang">Audio Language</label>
-        <input id="audioLang" type="text" placeholder="hi-IN, te-IN, sa-IN" />
-      </div>
-      <div class="field" style="min-width: 220px;">
-        <label for="audioTitle">Audio Title</label>
-        <input id="audioTitle" type="text" placeholder="Pravachanam title" />
-      </div>
-      <div class="field" style="min-width: 180px;">
-        <label for="audioSourceId">Audio Source ID</label>
-        <input id="audioSourceId" type="text" placeholder="pravachanam_series" />
-      </div>
-      <div class="field" style="min-width: 180px;">
-        <label for="audioSection">Audio Section</label>
-        <input id="audioSection" type="text" placeholder="optional" />
-      </div>
-      <button class="btn-primary" id="audioUploadBtn" style="margin-top: 18px;">Transcribe & Index</button>
-    </div>
-
     <div class="stats">
       <div class="stat"><div class="stat-label">Pending review</div><div class="stat-value" id="pendingCount">-</div></div>
       <div class="stat"><div class="stat-label">Gold entries</div><div class="stat-value" id="goldCount">-</div></div>
@@ -788,52 +764,8 @@ def _feedback_page() -> str:
       }
     }
 
-    async function uploadAudio() {
-      const fileInput = document.getElementById("audioFile");
-      const file = fileInput.files && fileInput.files[0];
-      if (!file) {
-        setNotice("Please choose an audio file first.", true);
-        return;
-      }
-      const key = adminKey();
-      if (!key) {
-        setNotice("Enter the admin key before uploading audio.", true);
-        return;
-      }
-
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("language_code", document.getElementById("audioLang").value || "hi-IN");
-      fd.append("description", document.getElementById("audioTitle").value || file.name);
-      fd.append("source_title", document.getElementById("audioTitle").value || file.name);
-      fd.append("source", document.getElementById("audioSourceId").value || "");
-      fd.append("section", document.getElementById("audioSection").value || "");
-
-      setNotice("Transcribing, translating when needed, and indexing audio...");
-      try {
-        const resp = await fetch("/api/v1/audio/transcribe", {
-          method: "POST",
-          headers: { "X-Admin-Key": key },
-          body: fd,
-        });
-        if (!resp.ok) {
-          let msg = resp.statusText;
-          try {
-            const body = await resp.json();
-            if (body && body.detail) msg = body.detail;
-          } catch (_) {}
-          throw new Error(msg);
-        }
-        const data = await resp.json();
-        setNotice("Indexed audio transcript chunks: " + data.chunks_created + " (" + data.transcript_file_name + ").");
-      } catch (e) {
-        setNotice("Audio upload failed: " + e.message, true);
-      }
-    }
-
     document.getElementById("loadBtn").addEventListener("click", load);
     document.getElementById("uploadBtn").addEventListener("click", uploadDocument);
-    document.getElementById("audioUploadBtn").addEventListener("click", uploadAudio);
     load();
   </script>
 </body>
@@ -854,6 +786,30 @@ async def list_datasets(_: None = Depends(require_admin_api_key)) -> dict:
 
 class DatasetToggle(BaseModel):
     active: bool
+
+
+class TranslationCreate(BaseModel):
+    source: str
+    source_title: str = ""
+    chunk_index: int | None = None
+    vector_chunk_id: str | None = None
+    original_text: str
+    original_language: str = "te"
+    translated_text: str
+    translated_language: str = "en"
+    translator_name: str = ""
+    section: str | None = None
+    start_time_sec: float | None = None
+    end_time_sec: float | None = None
+    notes: str = ""
+    verified: bool = False
+
+
+class TranslationUpdate(BaseModel):
+    translated_text: str | None = None
+    verified: bool | None = None
+    notes: str | None = None
+    translator_name: str | None = None
 
 
 @router.patch("/admin/datasets/{name}")
@@ -887,6 +843,63 @@ async def list_indexed_sources(limit: int = 300, _: None = Depends(require_admin
 async def usage_stats(limit: int = 50, _: None = Depends(require_admin_api_key)) -> dict:
     safe_limit = max(1, min(limit, 500))
     return summarize_usage(limit=safe_limit)
+
+
+# ── discourse_translations CRUD ───────────────────────────────────────────────
+
+@router.get("/admin/translations")
+async def list_translations(
+    source: str | None = None,
+    verified: bool | None = None,
+    limit: int = 100,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    from core.postgres_db import list_discourse_translations, use_postgres
+    if not use_postgres():
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+    items = list_discourse_translations(source=source, verified=verified, limit=limit)
+    return {"translations": items, "count": len(items)}
+
+
+@router.post("/admin/translations", status_code=201)
+async def create_translation(
+    body: TranslationCreate,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    from core.postgres_db import create_discourse_translation, use_postgres
+    if not use_postgres():
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+    result = create_discourse_translation(**body.model_dump())
+    return {"status": "created", **result}
+
+
+@router.patch("/admin/translations/{translation_id}")
+async def update_translation(
+    translation_id: str,
+    body: TranslationUpdate,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    from core.postgres_db import update_discourse_translation, use_postgres
+    if not use_postgres():
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+    ok = update_discourse_translation(translation_id, **body.model_dump(exclude_none=True))
+    if not ok:
+        raise HTTPException(status_code=404, detail="Translation not found")
+    return {"status": "updated", "id": translation_id}
+
+
+@router.delete("/admin/translations/{translation_id}")
+async def delete_translation(
+    translation_id: str,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    from core.postgres_db import delete_discourse_translation, use_postgres
+    if not use_postgres():
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+    ok = delete_discourse_translation(translation_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Translation not found")
+    return {"status": "deleted", "id": translation_id}
 
 
 # ── Main admin dashboard ───────────────────────────────────────────────────────
@@ -970,6 +983,7 @@ def _admin_page() -> str:
     <button class="tab" onclick="showTab('upload')">Upload</button>
     <button class="tab" onclick="showTab('test')">Test Query</button>
     <button class="tab" onclick="showTab('gold')">Gold Store</button>
+    <button class="tab" onclick="showTab('translations')">Translations</button>
   </div>
 
   <!-- ── DATASETS ── -->
@@ -1017,31 +1031,7 @@ def _admin_page() -> str:
   <!-- ── UPLOAD ── -->
   <div class="pane" id="pane-upload">
     <div class="card">
-      <div class="section-title">Audio Upload</div>
-      <div class="row three">
-        <div><label>Audio File (mp3/wav/m4a)</label><input type="file" id="au-file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.opus"/></div>
-        <div><label>Language</label>
-          <select id="au-lang">
-            <option value="te-IN">Telugu (te-IN)</option>
-            <option value="hi-IN">Hindi (hi-IN)</option>
-            <option value="sa-IN">Sanskrit (sa-IN)</option>
-            <option value="en-IN">English (en-IN)</option>
-          </select>
-        </div>
-        <div><label>Dataset Name</label><input id="au-dataset" type="text" placeholder="e.g. ramayanam-chaganti"/></div>
-      </div>
-      <div class="row two">
-        <div><label>Section (optional)</label><input id="au-section" type="text" placeholder="e.g. Bala Kanda"/></div>
-        <div><label>Description (optional)</label><input id="au-desc" type="text" placeholder="e.g. Part 1 clip 42"/></div>
-      </div>
-      <button class="btn-primary" onclick="uploadAudio()">Transcribe & Index</button>
-      <div class="notice" id="au-notice"></div>
-    </div>
-
-    <hr class="divider"/>
-
-    <div class="card">
-      <div class="section-title">Document Upload <span style="font-size:12px;color:var(--muted);font-weight:400">(txt / md / jsonl / json)</span></div>
+      <div class="section-title">Document Upload <span style="font-size:12px;color:var(--muted);font-weight:400">(pdf / txt / md / jsonl / json)</span></div>
       <div class="row three">
         <div><label>File</label><input type="file" id="doc-file" accept=".txt,.md,.jsonl,.json,.rst,.csv"/></div>
         <div><label>Dataset Name</label><input id="doc-dataset" type="text" placeholder="e.g. seed-corpus"/></div>
@@ -1104,6 +1094,62 @@ def _admin_page() -> str:
       <div id="gold-cards"><div class="empty">Click Refresh to load.</div></div>
     </div>
   </div>
+
+  <!-- ── TRANSLATIONS ── -->
+  <div class="pane" id="pane-translations">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="section-title" style="margin:0">Discourse Translations</div>
+        <button class="btn-ghost btn-sm" onclick="loadTranslations()">Refresh</button>
+      </div>
+      <div class="row three" style="margin-bottom:14px">
+        <div><label>Filter by Source</label><input id="tl-filter-source" type="text" placeholder="e.g. ramayana_discourse_001"/></div>
+        <div><label>Verified</label>
+          <select id="tl-filter-verified">
+            <option value="">All</option>
+            <option value="true">Verified only</option>
+            <option value="false">Unverified only</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end"><button class="btn-primary btn-sm" onclick="loadTranslations()">Filter</button></div>
+      </div>
+      <div id="tl-table"><div class="empty">Click Refresh to load.</div></div>
+      <div class="notice" id="tl-notice"></div>
+    </div>
+
+    <div class="card" id="tl-form-card">
+      <div class="section-title" id="tl-form-title">Add Translation</div>
+      <div class="row two">
+        <div><label>Source *</label><input id="tl-source" type="text" placeholder="ramayana_discourse_001"/></div>
+        <div><label>Source Title</label><input id="tl-source-title" type="text" placeholder="optional"/></div>
+      </div>
+      <div class="row three">
+        <div><label>Chunk Index</label><input id="tl-chunk-index" type="number" placeholder="optional"/></div>
+        <div><label>Vector Chunk ID</label><input id="tl-vector-id" type="text" placeholder="optional"/></div>
+        <div><label>Section</label><input id="tl-section" type="text" placeholder="optional"/></div>
+      </div>
+      <div class="row two">
+        <div><label>Original Language</label>
+          <select id="tl-orig-lang">
+            <option value="te">Telugu</option>
+            <option value="hi">Hindi</option>
+            <option value="sa">Sanskrit</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div><label>Translator Name</label><input id="tl-translator" type="text" placeholder="optional"/></div>
+      </div>
+      <div class="row two" style="margin-bottom:12px">
+        <div><label>Original Text *</label><textarea id="tl-orig" rows="3" placeholder="Original text in native language..."></textarea></div>
+        <div><label>English Translation *</label><textarea id="tl-trans" rows="3" placeholder="English translation..."></textarea></div>
+      </div>
+      <div style="margin-bottom:14px"><label>Notes</label><input id="tl-notes" type="text" placeholder="optional"/></div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="btn-primary" id="tl-save-btn" onclick="saveTl()">Add Translation</button>
+        <button class="btn-ghost btn-sm" id="tl-cancel-btn" onclick="cancelTl()" style="display:none">Cancel</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1124,7 +1170,7 @@ function adminHeaders(extra={}) {
 // ── Tab switching ──────────────────────────────────────────────────────────────
 function showTab(name) {
   document.querySelectorAll(".tab").forEach((t,i)=>{
-    const names=["datasets","sources","stats","upload","test","gold"];
+    const names=["datasets","sources","stats","upload","test","gold","translations"];
     t.classList.toggle("active", names[i]===name);
   });
   document.querySelectorAll(".pane").forEach(p => p.classList.remove("active"));
@@ -1133,6 +1179,7 @@ function showTab(name) {
   if(name==="sources") loadSources();
   if(name==="stats") loadStats();
   if(name==="gold") loadGold();
+  if(name==="translations") loadTranslations();
 }
 
 function setNotice(id, msg, err=false) {
@@ -1239,7 +1286,6 @@ function renderStats(d) {
     </div>
     <div class="row two">
       <div><div class="section-title">STT Models</div>${miniList(usage.transcription)}</div>
-      <div><div class="section-title">Translation Models</div>${miniList(usage.translation)}</div>
       <div><div class="section-title">Embeddings</div>${miniList(usage.embedding)}</div>
       <div><div class="section-title">Vector DB</div>${miniList(usage.vector_db)}</div>
       <div><div class="section-title">Answer Models</div>${miniList(usage.query_models)}</div>
@@ -1256,7 +1302,6 @@ function renderStats(d) {
     const ts = r.timestamp ? new Date(r.timestamp).toLocaleString() : "-";
     const models = [
       r.transcription_mode ? "STT: " + r.transcription_mode + " / " + (r.transcription_version || "-") : "",
-      r.translation_backend ? "TR: " + r.translation_backend + " / " + (r.translation_version || "-") : "",
       r.embedding_backend ? "EMB: " + r.embedding_backend : ""
     ].filter(Boolean).join("<br/>");
     html += `<tr>
@@ -1291,26 +1336,6 @@ async function deleteDs(name) {
     setNotice("ds-notice", `Deleted ${name}${purge?" (vectors purged)":""}.`);
     loadDatasets();
   } catch(e){ setNotice("ds-notice","Error: "+e.message,true); }
-}
-
-// ── Audio upload ──────────────────────────────────────────────────────────────
-async function uploadAudio() {
-  const file = document.getElementById("au-file").files?.[0];
-  if(!file){ setNotice("au-notice","Choose an audio file first.",true); return; }
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("language_code", document.getElementById("au-lang").value);
-  fd.append("dataset_name", document.getElementById("au-dataset").value.trim());
-  fd.append("section", document.getElementById("au-section").value.trim());
-  fd.append("description", document.getElementById("au-desc").value.trim() || file.name);
-  setNotice("au-notice","Transcribing and indexing… this may take 30–90s.");
-  try {
-    const r = await fetch(`${API}/audio/transcribe`, {method:"POST", headers:adminHeaders(), body:fd});
-    if(!r.ok){ const b=await r.json(); throw new Error(b.detail||r.statusText); }
-    const d = await r.json();
-    setNotice("au-notice",`Done. ${d.chunks_created} chunks indexed. Translation: ${d.translation_backend||"none"}.`);
-    showTab("datasets");
-  } catch(e){ setNotice("au-notice","Error: "+e.message,true); }
 }
 
 // ── Doc upload ────────────────────────────────────────────────────────────────
@@ -1425,6 +1450,143 @@ async function reviewGold(qid, status){
     document.getElementById("gc-"+qid)?.remove();
     setNotice("gold-notice", status==="approved"?"Approved.":"Rejected.");
   } catch(e){ setNotice("gold-notice","Error: "+e.message,true); }
+}
+
+// ── Translations ──────────────────────────────────────────────────────────────
+let _tlEditId = null;
+
+async function loadTranslations() {
+  const source = document.getElementById("tl-filter-source").value.trim();
+  const verified = document.getElementById("tl-filter-verified").value;
+  const params = new URLSearchParams({limit: "200"});
+  if (source) params.set("source", source);
+  if (verified) params.set("verified", verified);
+  setNotice("tl-notice", "Loading...");
+  try {
+    const r = await fetch("/admin/translations?" + params, {headers: adminHeaders()});
+    if (!r.ok) throw new Error(r.statusText);
+    const d = await r.json();
+    renderTl(d.translations || []);
+    setNotice("tl-notice", d.count + " translation(s) loaded.");
+  } catch(e) { setNotice("tl-notice", "Load failed: " + e.message, true); }
+}
+
+function renderTl(items) {
+  const el = document.getElementById("tl-table");
+  if (!items.length) { el.innerHTML = '<div class="empty">No translations yet.</div>'; return; }
+  let html = '<div style="overflow-x:auto"><table><thead><tr><th>Source</th><th>Chunk</th><th>Original</th><th>Translation</th><th>Verified</th><th>Translator</th><th>Actions</th></tr></thead><tbody>';
+  for (const t of items) {
+    const orig = esc((t.original_text || "").slice(0, 100)) + (t.original_text && t.original_text.length > 100 ? "…" : "");
+    const trans = esc((t.translated_text || "").slice(0, 100)) + (t.translated_text && t.translated_text.length > 100 ? "…" : "");
+    html += `<tr id="tlrow-${esc(t.id)}">
+      <td><strong>${esc(t.source_title || t.source)}</strong><br/><span style="font-size:11px;color:var(--muted)">${esc(t.source)}</span></td>
+      <td style="text-align:center">${t.chunk_index !== null && t.chunk_index !== undefined ? t.chunk_index : "–"}</td>
+      <td style="max-width:200px;overflow-wrap:anywhere;font-size:13px">${orig}</td>
+      <td style="max-width:200px;overflow-wrap:anywhere;font-size:13px">${trans}</td>
+      <td><span class="badge ${t.verified ? "on" : "off"}">${t.verified ? "✓ Yes" : "○ No"}</span></td>
+      <td style="font-size:12px">${esc(t.translator_name || "–")}</td>
+      <td style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn-sm btn-green" onclick="editTl(${JSON.stringify(JSON.stringify(t))})">Edit</button>
+        <button class="btn-sm ${t.verified ? "btn-ghost" : "btn-green"} btn-sm" onclick="toggleTlVerified('${esc(t.id)}', ${!t.verified})">${t.verified ? "Unverify" : "Verify"}</button>
+        <button class="btn-sm btn-red" onclick="deleteTl('${esc(t.id)}')">Delete</button>
+      </td>
+    </tr>`;
+  }
+  html += "</tbody></table></div>";
+  el.innerHTML = html;
+}
+
+function editTl(jsonStr) {
+  const t = JSON.parse(jsonStr);
+  _tlEditId = t.id;
+  document.getElementById("tl-source").value = t.source || "";
+  document.getElementById("tl-source-title").value = t.source_title || "";
+  document.getElementById("tl-chunk-index").value = t.chunk_index !== null && t.chunk_index !== undefined ? t.chunk_index : "";
+  document.getElementById("tl-vector-id").value = t.vector_chunk_id || "";
+  document.getElementById("tl-section").value = t.section || "";
+  document.getElementById("tl-orig-lang").value = t.original_language || "te";
+  document.getElementById("tl-translator").value = t.translator_name || "";
+  document.getElementById("tl-orig").value = t.original_text || "";
+  document.getElementById("tl-trans").value = t.translated_text || "";
+  document.getElementById("tl-notes").value = t.notes || "";
+  document.getElementById("tl-form-title").textContent = "Edit Translation";
+  document.getElementById("tl-save-btn").textContent = "Save Changes";
+  document.getElementById("tl-cancel-btn").style.display = "inline-block";
+  document.getElementById("tl-form-card").scrollIntoView({behavior: "smooth", block: "start"});
+}
+
+function cancelTl() {
+  _tlEditId = null;
+  ["tl-source","tl-source-title","tl-chunk-index","tl-vector-id","tl-section","tl-translator","tl-orig","tl-trans","tl-notes"].forEach(id => {
+    document.getElementById(id).value = "";
+  });
+  document.getElementById("tl-orig-lang").value = "te";
+  document.getElementById("tl-form-title").textContent = "Add Translation";
+  document.getElementById("tl-save-btn").textContent = "Add Translation";
+  document.getElementById("tl-cancel-btn").style.display = "none";
+}
+
+async function saveTl() {
+  const source = document.getElementById("tl-source").value.trim();
+  const orig = document.getElementById("tl-orig").value.trim();
+  const trans = document.getElementById("tl-trans").value.trim();
+  if (!source || !orig || !trans) {
+    setNotice("tl-notice", "Source, original text, and translation are required.", true); return;
+  }
+  const chunkIdxRaw = document.getElementById("tl-chunk-index").value;
+  const body = _tlEditId
+    ? {
+        translated_text: trans,
+        notes: document.getElementById("tl-notes").value.trim() || null,
+        translator_name: document.getElementById("tl-translator").value.trim() || null,
+      }
+    : {
+        source,
+        source_title: document.getElementById("tl-source-title").value.trim(),
+        chunk_index: chunkIdxRaw !== "" ? parseInt(chunkIdxRaw) : null,
+        vector_chunk_id: document.getElementById("tl-vector-id").value.trim() || null,
+        original_text: orig,
+        original_language: document.getElementById("tl-orig-lang").value,
+        translated_text: trans,
+        translator_name: document.getElementById("tl-translator").value.trim(),
+        section: document.getElementById("tl-section").value.trim() || null,
+        notes: document.getElementById("tl-notes").value.trim(),
+      };
+  const url = _tlEditId ? `/admin/translations/${encodeURIComponent(_tlEditId)}` : "/admin/translations";
+  const method = _tlEditId ? "PATCH" : "POST";
+  setNotice("tl-notice", "Saving...");
+  try {
+    const r = await fetch(url, {method, headers: adminHeaders({"Content-Type": "application/json"}), body: JSON.stringify(body)});
+    if (!r.ok) { const b = await r.json(); throw new Error(b.detail || r.statusText); }
+    setNotice("tl-notice", _tlEditId ? "Translation updated." : "Translation added.");
+    cancelTl();
+    loadTranslations();
+  } catch(e) { setNotice("tl-notice", "Error: " + e.message, true); }
+}
+
+async function toggleTlVerified(id, verified) {
+  setNotice("tl-notice", "Updating...");
+  try {
+    const r = await fetch(`/admin/translations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: adminHeaders({"Content-Type": "application/json"}),
+      body: JSON.stringify({verified}),
+    });
+    if (!r.ok) { const b = await r.json(); throw new Error(b.detail || r.statusText); }
+    setNotice("tl-notice", verified ? "Marked as verified." : "Marked as unverified.");
+    loadTranslations();
+  } catch(e) { setNotice("tl-notice", "Error: " + e.message, true); }
+}
+
+async function deleteTl(id) {
+  if (!confirm("Delete this translation?")) return;
+  setNotice("tl-notice", "Deleting...");
+  try {
+    const r = await fetch(`/admin/translations/${encodeURIComponent(id)}`, {method: "DELETE", headers: adminHeaders()});
+    if (!r.ok) { const b = await r.json(); throw new Error(b.detail || r.statusText); }
+    setNotice("tl-notice", "Deleted.");
+    loadTranslations();
+  } catch(e) { setNotice("tl-notice", "Error: " + e.message, true); }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

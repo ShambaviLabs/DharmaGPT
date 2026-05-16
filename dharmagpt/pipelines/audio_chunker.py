@@ -1,17 +1,18 @@
 """
 audio_chunker.py
 Receives Sarvam STT transcript (with word timestamps + diarization),
-applies pause-boundary chunking, translates chunks in parallel when needed,
-and upserts enriched chunks to the configured vector DB.
+applies pause-boundary chunking, and upserts enriched chunks to the
+configured vector DB.
+
+Translation is NOT done automatically — translations are provided manually
+via the discourse_translations table in Postgres.
 
 All backends pluggable via .env:
-  TRANSLATION_BACKEND = sarvam | anthropic | ollama | indictrans2 | skip
-  EMBEDDING_BACKEND   = openai | local_hash
-  RAG_BACKEND         = local | pinecone
+  EMBEDDING_BACKEND = openai | local_hash
+  RAG_BACKEND       = local | pinecone
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import uuid
 
@@ -20,7 +21,6 @@ import structlog
 from core.config import get_settings
 from core.local_vector_store import upsert_vectors
 from core.retrieval import embed_texts, get_pinecone
-from core.backends.translation import get_translator
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -104,106 +104,26 @@ def _normalize_language_code(language_code: str) -> str:
     return lang
 
 
-def _translate_chunks_parallel(
-    chunks: list[dict],
-    *,
-    source_lang: str,
-    target_lang: str = "en",
-) -> list[str | None]:
-    """Translate chunks in parallel using the configured TRANSLATION_BACKEND."""
-    if not chunks:
-        return []
-
-    translator = get_translator()
-    results: list[str | None] = [None] * len(chunks)
-
-    with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as executor:
-        futures = {
-            executor.submit(translator.translate, chunk["text"], source_lang, target_lang): idx
-            for idx, chunk in enumerate(chunks)
-        }
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                result = future.result()
-                results[idx] = result.text if not result.skipped else None
-            except Exception as exc:
-                log.warning("audio_translation_failed", chunk_index=idx, error=str(exc))
-                results[idx] = None
-
-    return results
-
-
-def _summarize_provenance(backend_name: str, translated_count: int) -> dict:
-    if not translated_count:
-        return {
-            "translation_mode": None,
-            "translation_backend": None,
-            "translation_version": backend_name,
-            "translation_fallback_reason": None,
-            "translation_attempted_backends": None,
-        }
-    return {
-        "translation_mode": backend_name,
-        "translation_backend": backend_name,
-        "translation_version": backend_name,
-        "translation_fallback_reason": None,
-        "translation_attempted_backends": [backend_name],
-    }
-
-
 async def chunk_and_index(
     transcript_data: dict,
     filename: str,
     file_metadata: dict,
     dataset_id: str = "",
 ) -> dict:
-    """Main entry: chunk -> translate -> embed -> upsert to configured vector DB."""
+    """Main entry: chunk -> embed -> upsert to configured vector DB.
+
+    No automatic translation. Translations are provided manually via the
+    discourse_translations Postgres table and linked by source + chunk index.
+    """
     words = transcript_data.get("words", [])
     raw_text = transcript_data.get("transcript", "")
 
     raw_chunks = _chunk_by_pause(words) if words else _fallback_chunk(raw_text)
     if not raw_chunks:
-        return {
-            "chunks_created": 0,
-            "translated_transcript": None,
-            "translation_mode": None,
-            "translation_backend": None,
-            "translation_version": None,
-            "translation_fallback_reason": None,
-            "translation_attempted_backends": None,
-        }
+        return {"chunks_created": 0, "vector_db": None, "vectors_upserted": 0, "embedding_backend": None}
 
-    source_lang = _normalize_language_code(file_metadata.get("language_code", "en"))
-    needs_translation = source_lang != "en"
-    translated_chunks: list[str] = []
-
-    # Fastest path: Sarvam STT already returned clip-level English — reuse it directly.
-    sarvam_en = (transcript_data.get("text_en_sarvam") or "").strip()
-
-    if needs_translation and sarvam_en:
-        translated_chunks = [sarvam_en] * len(raw_chunks)
-        translator_backend = "sarvam_stt_translate"
-        log.info("using_sarvam_clip_translation", file=filename, chunks=len(raw_chunks))
-    elif needs_translation:
-        per_chunk = _translate_chunks_parallel(raw_chunks, source_lang=source_lang, target_lang="en")
-        translated_chunks = [t or "" for t in per_chunk]
-        translator_backend = get_translator().backend_name
-    else:
-        translated_chunks = ["" for _ in raw_chunks]
-        translator_backend = "none"
-
-    provenance = _summarize_provenance(
-        translator_backend,
-        len([t for t in translated_chunks if t]),
-    )
     stem = filename.rsplit(".", 1)[0]
-
-    # Concatenate original + translation for richer embeddings
-    texts = [
-        f"{chunk['text']} | {translated.strip()}" if translated.strip() else chunk["text"]
-        for chunk, translated in zip(raw_chunks, translated_chunks)
-    ]
+    texts = [chunk["text"] for chunk in raw_chunks]
 
     try:
         vectors, embedding_backend = await embed_texts(texts)
@@ -213,7 +133,7 @@ async def chunk_and_index(
         embedding_backend = None
 
     records = []
-    for i, (chunk, vec, translated) in enumerate(zip(raw_chunks, vectors, translated_chunks)):
+    for i, (chunk, vec) in enumerate(zip(raw_chunks, vectors)):
         record_metadata = {
             "source_type": "audio",
             "source_file": filename,
@@ -232,18 +152,11 @@ async def chunk_and_index(
             "word_count": len(chunk["text"].split()),
             "transcription_mode": file_metadata.get("transcription_mode", "sarvam_stt"),
             "transcription_version": file_metadata.get("transcription_version", "saaras:v3"),
-            "translation_mode": provenance["translation_mode"] or "",
-            "translation_backend": provenance["translation_backend"] or "",
-            "translation_version": provenance["translation_version"] or "",
-            "translation_fallback_reason": provenance["translation_fallback_reason"] or "",
-            "translation_attempted_backends": provenance["translation_attempted_backends"] or [],
             "embedding_backend": embedding_backend or "",
+            "chunk_index": i,
         }
         if dataset_id:
             record_metadata["dataset_id"] = dataset_id
-        if translated.strip():
-            record_metadata["translated_text"] = translated.strip()
-            record_metadata["translated_text_preview"] = translated[:300]
 
         records.append({
             "id": f"audio_{stem}_{uuid.uuid4().hex[:8]}_{i:04d}",
@@ -268,26 +181,16 @@ async def chunk_and_index(
                 index.upsert(vectors=batch)
                 upserted += len(batch)
 
-    translated_transcript = (
-        "\n".join(t for t in translated_chunks if t.strip()) if needs_translation else None
-    )
     log.info(
         "audio_indexed",
         file=filename,
         chunks=len(raw_chunks),
         vector_db=vector_db,
         vectors=upserted,
-        translation_backend=provenance["translation_backend"],
         embedding_backend=embedding_backend,
     )
     return {
         "chunks_created": len(raw_chunks),
-        "translated_transcript": translated_transcript,
-        "translation_mode": provenance["translation_mode"],
-        "translation_backend": provenance["translation_backend"],
-        "translation_version": provenance["translation_version"],
-        "translation_fallback_reason": provenance["translation_fallback_reason"],
-        "translation_attempted_backends": provenance["translation_attempted_backends"],
         "vector_db": vector_db,
         "vectors_upserted": upserted,
         "embedding_backend": embedding_backend,

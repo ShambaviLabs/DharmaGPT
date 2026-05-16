@@ -55,16 +55,13 @@ class AudioTranscribeRequest(BaseModel):
 
 class AudioTranscribeResponse(BaseModel):
     transcript: str
-    translated_transcript: Optional[str] = None
     chunks_created: int
     file_name: str
     transcript_file_name: Optional[str] = None
     transcription_mode: str = "sarvam_stt"
     transcription_version: str = "saaras:v3"
-    translation_mode: Optional[str] = None
-    translation_backend: Optional[str] = None
-    translation_version: Optional[str] = None
-    translation_fallback_reason: Optional[str] = None
+    # Translation fields removed — translations are provided manually via
+    # the discourse_translations Postgres table.
 
 
 class FeedbackRating(str, Enum):
