@@ -472,6 +472,7 @@ async def list_admin_chunks(
     filters.append("vector_status = %s")
     params.append(vector_status.strip())
   where = "WHERE " + " AND ".join(filters) if filters else ""
+  params.append(int(limit))
   with pg_connect() as conn:
     pg_ensure_schema(conn)
     rows = conn.execute(
@@ -482,7 +483,7 @@ async def list_admin_chunks(
       FROM chunk_store
       {where}
       ORDER BY created_at DESC
-      LIMIT {limit}
+      LIMIT %s
       """,
       params,
     ).fetchall()
