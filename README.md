@@ -4,9 +4,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![CI](https://github.com/ShambaviLabs/DharmaGPT/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ShambaviLabs/DharmaGPT/actions/workflows/ci.yml)
 
-AI-powered access to Hindu sacred texts, built around cited answers from source material.
-
-DharmaGPT is a FastAPI backend for asking questions, generating grounded retellings, looking up passages, and processing devotional audio. It uses retrieval-augmented generation so responses can point back to citations instead of relying on unsupported model output.
+AI‑powered access to India's vast dharmic knowledge, built around cited answers from source material. 
 
 ## Features
 
@@ -81,4 +79,4 @@ make pipeline
 
 ## License
 
-ShambaviLabs - free to use for all dharmic purposes.
+ShambaviLabs – free to use for all dharmic purposes.

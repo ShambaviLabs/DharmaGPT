@@ -1,0 +1,29 @@
+# DharmaGPT MCP Server — systemd service template
+#
+# Setup on beta server:
+#   1. Copy to /etc/systemd/system/dharmagpt-mcp.service
+#   2. Fill in REPO_PATH and USER below
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable dharmagpt-mcp
+#   5. sudo systemctl start dharmagpt-mcp
+#   6. sudo systemctl status dharmagpt-mcp
+
+[Unit]
+Description=DharmaGPT MCP Server
+After=network.target dharmagpt-api.service
+Requires=dharmagpt-api.service
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=REPO_PATH/dharmagpt
+Environment="PYTHONPATH=REPO_PATH/dharmagpt"
+EnvironmentFile=REPO_PATH/dharmagpt/.env
+ExecStart=REPO_PATH/dharmagpt/.venv/bin/python mcp_server.py --transport streamable-http --port 8001
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
