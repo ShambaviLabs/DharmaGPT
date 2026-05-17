@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import structlog
 
 from core.config import get_settings
-from api.routes import query, audio, health, admin, feedback, chat
+from api.routes import query, audio, health, admin, feedback, chat, openai_compat
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -40,3 +40,4 @@ app.include_router(audio.router, prefix="/api/v1/audio", tags=["audio"])
 app.include_router(feedback.router, prefix="/api/v1", tags=["feedback"])
 app.include_router(admin.router, tags=["admin"])
 app.include_router(chat.router, tags=["chat"])
+app.include_router(openai_compat.router, tags=["openai-compat"])
