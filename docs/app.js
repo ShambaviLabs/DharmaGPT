@@ -37,9 +37,6 @@ async function fetchDashboardMetrics() {
 
 // Populate UI Elements with loaded JSON data
 function populateDashboard(data) {
-  // Update generated time
-  document.getElementById("gen-time").textContent = data.generated_at || "N/A";
-  
   // Update total chunks counter
   const totalChunks = data.stats.total_chunks;
   document.getElementById("stat-chunks").textContent = Number(totalChunks).toLocaleString();
