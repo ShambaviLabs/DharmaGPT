@@ -1,6 +1,6 @@
 # DharmaGPT
 
-[![Made with Love in India](https://madewithlove.org.in/badge.svg)](https://madewithlove.org.in)
+[![Love from India](https://madewithlove.org.in/badge.svg)](https://madewithlove.org.in)
 [![Powered by Sarvam AI](https://img.shields.io/badge/Audio-Sarvam%20AI-blue)](https://sarvam.ai)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![CI](https://github.com/ShambaviLabs/DharmaGPT/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ShambaviLabs/DharmaGPT/actions/workflows/ci.yml)
