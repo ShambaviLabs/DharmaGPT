@@ -1,6 +1,5 @@
 # DharmaGPT
 
-[![From Bharat to the World](https://raw.githubusercontent.com/ShambaviLabs/DharmaGPT/main/docs/bharat-badge.svg)](https://github.com/ShambaviLabs/DharmaGPT)
 [![Powered by Sarvam AI](https://img.shields.io/badge/Audio-Sarvam%20AI-blue)](https://sarvam.ai)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![CI](https://github.com/ShambaviLabs/DharmaGPT/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ShambaviLabs/DharmaGPT/actions/workflows/ci.yml)
