@@ -70,10 +70,20 @@ audio-vectorize:
 
 # ─── Dev server ───────────────────────────────────────────────────────────────
 
-## Start the FastAPI dev server
+## Start the FastAPI dev server (port 8000)
 .PHONY: serve
 serve:
 	cd dharmagpt && $(PYTHONPATH_SET) uvicorn api.main:app --reload --port 8000
+
+## Start the MCP server locally via stdio (for Claude Desktop dev testing)
+.PHONY: serve-mcp
+serve-mcp:
+	cd dharmagpt && $(PYTHONPATH_SET) $(PYTHON) mcp_server.py
+
+## Start the MCP server over HTTP (port 8001, for hosted/remote access)
+.PHONY: serve-mcp-http
+serve-mcp-http:
+	cd dharmagpt && $(PYTHONPATH_SET) $(PYTHON) mcp_server.py --transport streamable-http --port 8001
 
 .PHONY: help
 help:
