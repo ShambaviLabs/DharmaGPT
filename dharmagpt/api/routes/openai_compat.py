@@ -96,6 +96,27 @@ def _format_sources(sources) -> str:
     return "\n".join(lines)
 
 
+# ── Models list ─────────────────────────────────────────────────────────────
+
+_MODELS = [
+    {"id": "dharmagpt",          "description": "Guidance mode — dharmic wisdom, emotional support"},
+    {"id": "dharmagpt-scholar",  "description": "Academic, structured, IAST citations"},
+    {"id": "dharmagpt-story",    "description": "Narrative retelling grounded in source texts"},
+    {"id": "dharmagpt-children", "description": "Age-appropriate stories with moral lessons"},
+]
+
+@router.get("/v1/models", tags=["openai-compat"])
+async def list_models(authorization: Optional[str] = Header(default=None, alias="Authorization")):
+    _require_key(authorization)
+    return {
+        "object": "list",
+        "data": [
+            {"id": m["id"], "object": "model", "created": 1747000000, "owned_by": "shambavilabs"}
+            for m in _MODELS
+        ],
+    }
+
+
 # ── Endpoint ────────────────────────────────────────────────────────────────
 
 @router.post("/v1/chat/completions", response_model=OAIChatResponse, tags=["openai-compat"])
