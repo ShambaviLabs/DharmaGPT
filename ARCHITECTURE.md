@@ -23,6 +23,11 @@ FastAPI  (dharmagpt/api/)
 6. Claude generates an answer grounded in those passages, with inline verse-level citations
 7. Response returned with `answer` + `sources[]` (citation, section, chapter, verse, score)
 
+LangChain is used only as a provider adapter at the chat-model boundary. The
+retrieval flow, context formatting, citation enrichment, prompts, and API
+response shape are owned by DharmaGPT code so grounding behavior remains easy
+to inspect and test.
+
 ## Data Flow: Audio Ingestion
 
 1. Caller uploads audio file (chanting, pravachanam, discourse) via `POST /api/v1/audio/transcribe` with optional `section` metadata

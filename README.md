@@ -20,6 +20,7 @@ DharmaGPT is a FastAPI backend for asking questions, generating grounded retelli
 
 - FastAPI
 - Anthropic Claude
+- LangChain provider adapters
 - pgvector
 - OpenAI embeddings
 - Sarvam AI audio
