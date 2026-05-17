@@ -1,27 +1,24 @@
 <!-- ShambaviLabs Bharat Badge v1 — github.com/ShambaviLabs/DharmaGPT — fork to use -->
-<svg xmlns="http://www.w3.org/2000/svg" width="90" height="60" role="img" aria-label="From Bharat to the World — ShambaviLabs">
+<svg xmlns="http://www.w3.org/2000/svg" width="252" height="60" role="img" aria-label="From Bharat to the World — ShambaviLabs">
   <title>From Bharat to the World — ShambaviLabs</title>
 
   <clipPath id="clip">
-    <rect width="90" height="60" rx="4" fill="#fff"/>
+    <rect width="252" height="60" rx="4" fill="#fff"/>
   </clipPath>
 
   <g clip-path="url(#clip)">
-    <!-- Saffron -->
+    <!-- ── Left: Indian flag (90px wide) ── -->
     <rect width="90" height="20" fill="#FF9933"/>
-    <!-- White -->
     <rect y="20" width="90" height="20" fill="#FFFFFF"/>
-    <!-- India green -->
     <rect y="40" width="90" height="20" fill="#138808"/>
+
+    <!-- ── Right: dark text section (162px wide) ── -->
+    <rect x="90" width="162" height="60" fill="#0F1B2D"/>
   </g>
 
-  <!-- Ashoka Chakra — navy blue, centered on white stripe (cx=45, cy=30) -->
-  <!-- Outer ring -->
+  <!-- Ashoka Chakra — cx=45, cy=30 -->
   <circle cx="45" cy="30" r="13" fill="none" stroke="#000080" stroke-width="1.3"/>
-  <!-- Hub -->
   <circle cx="45" cy="30" r="2.2" fill="#000080"/>
-
-  <!-- 24 spokes at 15° intervals, hub r=2.2, outer r=13 -->
   <g stroke="#000080" stroke-width="0.9">
     <line x1="45.00" y1="27.80" x2="45.00" y2="17.00"/>
     <line x1="45.57" y1="27.88" x2="48.37" y2="17.44"/>
@@ -49,6 +46,15 @@
     <line x1="44.43" y1="27.88" x2="41.63" y2="17.44"/>
   </g>
 
-  <!-- Thin border -->
-  <rect width="90" height="60" rx="4" fill="none" stroke="#ccc" stroke-width="0.8"/>
+  <!-- Divider line between flag and text -->
+  <line x1="90" y1="0" x2="90" y2="60" stroke="#2a3a4a" stroke-width="1"/>
+
+  <!-- Text: saffron top line, white bottom line -->
+  <g font-family="DejaVu Sans,Verdana,Geneva,sans-serif" text-anchor="middle">
+    <text x="171" y="26" font-size="13" font-weight="bold" fill="#FF9933" letter-spacing="0.5">From Bharat</text>
+    <text x="171" y="44" font-size="12" fill="#e0e0e0" letter-spacing="0.3">to the World →</text>
+  </g>
+
+  <!-- Border -->
+  <rect width="252" height="60" rx="4" fill="none" stroke="#2a3a4a" stroke-width="1"/>
 </svg>
