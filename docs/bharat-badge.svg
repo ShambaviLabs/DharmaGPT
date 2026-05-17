@@ -1,0 +1,37 @@
+<!-- ShambaviLabs Bharat Badge v1 — github.com/ShambaviLabs/DharmaGPT — fork to use -->
+<svg xmlns="http://www.w3.org/2000/svg" width="210" height="28" role="img" aria-label="from Bharat to the World">
+  <title>From Bharat to the World — ShambaviLabs</title>
+
+  <linearGradient id="shade" x2="0" y2="100%">
+    <stop offset="0" stop-color="#fff" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+
+  <clipPath id="clip">
+    <rect width="210" height="28" rx="4" fill="#fff"/>
+  </clipPath>
+
+  <!-- Tricolour accent strip at top -->
+  <g clip-path="url(#clip)">
+    <rect width="210" height="2" fill="#FF9933"/>
+    <rect y="2" width="210" height="2" fill="#fff" fill-opacity=".9"/>
+    <rect y="4" width="210" height="2" fill="#0B4F8A"/>
+
+    <!-- Left: Bharat (saffron) -->
+    <rect y="6" width="116" height="22" fill="#FF9933"/>
+    <!-- Right: World (Chakra blue) -->
+    <rect x="116" y="6" width="94" height="22" fill="#0B4F8A"/>
+
+    <rect y="6" width="210" height="22" fill="url(#shade)"/>
+  </g>
+
+  <g font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="10" font-weight="bold"
+     letter-spacing="0.8" text-anchor="middle" fill="#fff">
+    <!-- Shadow layer -->
+    <text x="59" y="22" fill="#000" fill-opacity=".25">&#9784; FROM BHARAT</text>
+    <text x="164" y="22" fill="#000" fill-opacity=".25">TO THE WORLD &#8594;</text>
+    <!-- Text -->
+    <text x="59" y="21">&#9784; FROM BHARAT</text>
+    <text x="164" y="21">TO THE WORLD &#8594;</text>
+  </g>
+</svg>
